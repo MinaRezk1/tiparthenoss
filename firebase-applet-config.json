@@ -1,10 +1,9 @@
 {
-  "projectId": "attendance-rois",
-  "appId": "1:665929849181:web:0b6a995e3b62e674eeb0b4",
-  "apiKey": "AIzaSyAYMKZe9dS3HhVED3GLwaMKgRwQvodCgsw",
-  "authDomain": "attendance-rois.firebaseapp.com",
-  "firestoreDatabaseId": "(default)",
-  "storageBucket": "attendance-rois.firebasestorage.app",
-  "messagingSenderId": "665929849181",
-  "measurementId": ""
+  "apiKey": "AIzaSyArbCVsyTpFSGCY9niAXGaTfWtC9DB3uW4",
+  "authDomain": "tiparthenos-d5976.firebaseapp.com",
+  "projectId": "tiparthenos-d5976",
+  "storageBucket": "tiparthenos-d5976.firebasestorage.app",
+  "messagingSenderId": "972889784328",
+  "appId": "1:972889784328:web:0776c8b821015d594891bd",
+  "firestoreDatabaseId": "(default)"
 }
