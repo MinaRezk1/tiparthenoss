@@ -4,5 +4,8 @@ service cloud.firestore {
     match /appData/{document} {
       allow read, write: if true;
     }
+    match /shop/{document} {
+      allow read, write: if true;
+    }
   }
 }

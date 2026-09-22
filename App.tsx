@@ -7,6 +7,16 @@ import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 
 
 
+// --- Browser storage namespace ---
+// موقع البنات وموقع الولاد على نفس العنوان (minarezk1.github.io) فبيشاركوا نفس localStorage.
+// كل المفاتيح هنا بتتحفظ باسم مختلف عشان داتا الموقعين متتلخبطش مع بعض.
+const STORAGE_NAMESPACE = 'tiparthenos_girls:';
+const appStorage = {
+    getItem: (key: string) => localStorage.getItem(STORAGE_NAMESPACE + key),
+    setItem: (key: string, value: string) => localStorage.setItem(STORAGE_NAMESPACE + key, value),
+    removeItem: (key: string) => localStorage.removeItem(STORAGE_NAMESPACE + key),
+};
+
 const generateId = () => `_${Math.random().toString(36).substring(2, 11)}`;
 
 const CAIRO_TIMEZONE = 'Africa/Cairo';
@@ -111,9 +121,7 @@ const getMeetingTimeMessage = () => {
 };
 
 // --- Current student roster whitelist (source rosters only) ---
-const APPROVED_STUDENT_ROSTER_NAMES = [
-    "أمير رأفت ميخائيل", "أمير رأفت وهبة", "بافلي هاني عدلي", "بولا انطون جرجس", "بولا فيليب فوزي", "بيشوي جرجس فتحي", "بيشوي جوزيف وجدي", "جورج كرم عبدة", "جيوفاني رؤوف وهبة", "رامز عماد عبيد", "استيفن جورج", "فادي عادل عريان", "فيلوباتير أسامة رمسيس", "فيلوباتير عصام جرجس", "فيلوباتير عماد عبيد", "فيلوباتير وليد حنين", "كيرلس عادل", "كيرلس نادي فرح", "كيرلس هاني فكري", "كيفين رامي حنا", "كيفين هاني عزيز", "مارسيليو سامر سعيد", "مايكل طارق عوض", "مينا هاني سمير", "يوسف مايكل عجيب", "يوسف روماني", "فيلوباتير عادل", "جرجس صابر", "فيلوباتير ماهر", "انطونيوس سامح", "يوسف جورج", "بولا مجدي", "ديفيد هاني", "نوفير ماجد", "بيتر عماد", "بافلي سمير", "كيرلس وجدي", "جوفاني مايكل", "ديفيد سامح", "فيلوباتير امجد", "فادي ايهاب", "مكاريوس عاطف", "ابانوب هاني", "جوفاني هاني", "ابرام ياسر", "جورج وجيه", "توني ريمون", "مينا هاني (بخيت)", "جرجس نبيل", "جورج شريف", "كيرلس ماجد", "استيفن منير", "جوسيان جرجس", "مينا ميلاد", "نوفير مايكل", "ماريو وائل", "اندرو صفوت واصف قزمان", "أنطون طارق", "توماس اشرف", "جوناثان ممدوح لبيب", "سبستيان ممدوح فتحي عزمي", "كيرلس اسامة حنا", "يوسف عادل عريان", "يوسف مصباح وليم حنا", "ماريو ممدوح", "انطونيوس سمر عزيز", "بافلي جورج", "توني سعيد جابر", "دانيال يوسف", "فيلوباتير خلف منقريوس", "كيرلس ميالد يوسف فهيم", "كيرلس نادي", "مارك هاني", "مينا جرجس حليم", "ابانوب ايليا ملك", "ابانوب داود بخيت", "بولا ميالد عوض الله", "كيرلس فليب فوزي", "ماركو عاطف", "مارك ايهاب صلاح", "مرقص معوض مرقص", "نوفير جورج طانيوس داود", "نوفير باسلي", "مينا ايهاب عطالله عطية"
-];
+const APPROVED_STUDENT_ROSTER_NAMES: string[] = [];
 
 const normalizeRosterStudentName = (name) => String(name || '')
     .normalize('NFKC')
@@ -132,17 +140,11 @@ const isApprovedRosterStudent = (student) => Boolean(
     student && APPROVED_STUDENT_ROSTER_KEYS.has(normalizeRosterStudentName(student.name))
 );
 
-const FIRST_SECONDARY_ROSTER_NAMES = [
-    "أمير رأفت ميخائيل", "أمير رأفت وهبة", "بافلي هاني عدلي", "بولا انطون جرجس", "بولا فيليب فوزي", "بيشوي جرجس فتحي", "بيشوي جوزيف وجدي", "جورج كرم عبدة", "جيوفاني رؤوف وهبة", "رامز عماد عبيد", "استيفن جورج", "فادي عادل عريان", "فيلوباتير أسامة رمسيس", "فيلوباتير عصام جرجس", "فيلوباتير عماد عبيد", "فيلوباتير وليد حنين", "كيرلس عادل", "كيرلس نادي فرح", "كيرلس هاني فكري", "كيفين رامي حنا", "كيفين هاني عزيز", "مارسيليو سامر سعيد", "مايكل طارق عوض", "مينا هاني سمير", "يوسف مايكل عجيب", "يوسف روماني"
-];
+const FIRST_SECONDARY_ROSTER_NAMES: string[] = [];
 
-const SECOND_SECONDARY_ROSTER_NAMES = [
-    "فيلوباتير عادل", "جرجس صابر", "فيلوباتير ماهر", "انطونيوس سامح", "يوسف جورج", "بولا مجدي", "ديفيد هاني", "نوفير ماجد", "بيتر عماد", "بافلي سمير", "كيرلس وجدي", "جوفاني مايكل", "ديفيد سامح", "فيلوباتير امجد", "فادي ايهاب", "مكاريوس عاطف", "ابانوب هاني", "جوفاني هاني", "ابرام ياسر", "جورج وجيه", "توني ريمون", "مينا هاني (بخيت)", "جرجس نبيل", "جورج شريف", "كيرلس ماجد", "استيفن منير", "جوسيان جرجس", "مينا ميلاد", "نوفير مايكل", "ماريو وائل"
-];
+const SECOND_SECONDARY_ROSTER_NAMES: string[] = [];
 
-const THIRD_SECONDARY_ROSTER_NAMES = [
-    "اندرو صفوت واصف قزمان", "أنطون طارق", "توماس اشرف", "جوناثان ممدوح لبيب", "سبستيان ممدوح فتحي عزمي", "كيرلس اسامة حنا", "يوسف عادل عريان", "يوسف مصباح وليم حنا", "ماريو ممدوح", "انطونيوس سمر عزيز", "بافلي جورج", "توني سعيد جابر", "دانيال يوسف", "فيلوباتير خلف منقريوس", "كيرلس ميالد يوسف فهيم", "كيرلس نادي", "مارك هاني", "مينا جرجس حليم", "ابانوب ايليا ملك", "ابانوب داود بخيت", "بولا ميالد عوض الله", "كيرلس فليب فوزي", "ماركو عاطف", "مارك ايهاب صلاح", "مرقص معوض مرقص", "نوفير جورج طانيوس داود", "نوفير باسلي", "مينا ايهاب عطالله عطية"
-];
+const THIRD_SECONDARY_ROSTER_NAMES: string[] = [];
 
 const ROSTER_GRADE_BY_KEY = new Map<string, string>([
     ...FIRST_SECONDARY_ROSTER_NAMES.map(name => [normalizeRosterStudentName(name), 'أولى ثانوي'] as [string, string]),
@@ -158,152 +160,9 @@ const getStudentTotalPoints = (student) => (
 
 const CURRENT_ROSTER_MIGRATION_VERSION = '2026-09-19-84-v8';
 
-const LEGACY_PREVIOUS_POINTS_BY_ROSTER_KEY = {
-    "انطونطارق": 69,
-    "ابانوبايلياملك": 85,
-    "ابانوبداودبخيت": 258,
-    "ابانوبهاني": 20,
-    "ابرامياسر": 253,
-    "استيفنمنير": 95,
-    "اندروصفوتواصفقزمان": 70,
-    "انطونيوسسامح": 76,
-    "انطونيوسسمرعزيز": 201,
-    "بافليجورج": 10,
-    "بافليسمير": 0,
-    "بولامجدي": 81,
-    "بولاميالدعوضالله": 0,
-    "توماساشرف": 0,
-    "تونيريمون": 0,
-    "تونيسعيدجابر": 308,
-    "جرجسصابر": 40,
-    "جرجسنبيل": 232,
-    "جورجشريف": 147,
-    "جورجوجيه": 264,
-    "جوسيانجرجس": 223,
-    "جوفانيمايكل": 678,
-    "جوفانيهاني": 67,
-    "جوناثانممدوحلبيب": 0,
-    "دانياليوسف": 0,
-    "ديفيدسامح": 193,
-    "ديفيدهاني": 90,
-    "سبستيانممدوحفتحيعزمي": 32,
-    "فاديايهاب": 22,
-    "فيلوباتيرامجد": 81,
-    "فيلوباتيرخلفمنقريوس": 35,
-    "فيلوباتيرعادل": 90,
-    "فيلوباتيرماهر": 166,
-    "كيرلساسامهحنا": 0,
-    "كيرلسفليبفوزي": 10,
-    "كيرلسماجد": 429,
-    "كيرلسميالديوسففهيم": 20,
-    "كيرلسنادي": 188,
-    "كيرلسوجدي": 20,
-    "ماركايهابصلاح": 10,
-    "ماركهاني": 0,
-    "ماركوعاطف": 182,
-    "ماريوممدوح": 60,
-    "ماريووائل": 666,
-    "مرقصمعوضمرقص": 39,
-    "مكاريوسعاطف": 0,
-    "ميناايهابعطاللهعطيه": 0,
-    "ميناجرجسحليم": 20,
-    "ميناميلاد": 689,
-    "ميناهانيبخيت": 20,
-    "نوفيرباسلي": 188,
-    "نوفيرجورجطانيوسداود": 445,
-    "نوفيرماجد": 0,
-    "نوفيرمايكل": 359,
-    "يوسفجورج": 182,
-    "يوسفعادلعريان": 0,
-    "يوسفمصباحوليمحنا": 94
-};
+const LEGACY_PREVIOUS_POINTS_BY_ROSTER_KEY: Record<string, number> = {};
 
-const ROSTER_PHONE_BY_KEY: Record<string, string> = Object.fromEntries([
-    ["فيلوباتير عادل", "01202821716"],
-    ["جرجس صابر", "01222608959"],
-    ["فيلوباتير ماهر", "01064383757"],
-    ["انطونيوس سامح", "01225365059"],
-    ["يوسف جورج", "01068970742"],
-    ["بولا مجدي", "01270041687"],
-    ["ديفيد هاني", "01226638735"],
-    ["نوفير ماجد", "01211799691"],
-    ["بيتر عماد", "01501609107"],
-    ["بافلي سمير", "01204071377"],
-    ["كيرلس وجدي", "01151984121"],
-    ["جوفاني مايكل", "01555900607"],
-    ["ديفيد سامح", "01212400881"],
-    ["فيلوباتير امجد", "01202584343"],
-    ["فادي ايهاب", "01211964760"],
-    ["مكاريوس عاطف", "01226609164"],
-    ["ابانوب هاني", "01284705773"],
-    ["جوفاني هاني", "01287597237"],
-    ["ابرام ياسر", "01278793264"],
-    ["جورج وجيه", "01204715400"],
-    ["توني ريمون", "01220800188"],
-    ["مينا هاني (بخيت)", "01276060326"],
-    ["جرجس نبيل", "01223624989"],
-    ["جورج شريف", "01122701955"],
-    ["كيرلس ماجد", "01227547039"],
-    ["استيفن منير", "01274014019"],
-    ["جوسيان جرجس", "01220294180"],
-    ["مينا ميلاد", "01276059466"],
-    ["نوفير مايكل", "01275882859"],
-    ["ماريو وائل", "01020462906"],
-    ["اندرو صفوت واصف قزمان", "01287559288"],
-    ["أنطون طارق", "01279826512"],
-    ["توماس اشرف", "01224397257"],
-    ["جوناثان ممدوح لبيب", "01212167401"],
-    ["سبستيان ممدوح فتحي عزمي", "01206193106"],
-    ["كيرلس اسامة حنا", "01270543922"],
-    ["يوسف عادل عريان", "01278245193"],
-    ["يوسف مصباح وليم حنا", "01271324533"],
-    ["ماريو ممدوح", "01272595973"],
-    ["انطونيوس سمرعزيز", "01289887538"],
-    ["بافلى جورج", "01210974334"],
-    ["توني سعيد جابر", "01226829955"],
-    ["دانيال يوسف", "01275079109"],
-    ["فيلوباتير خلف منقريوس", "01221743554"],
-    ["كيرلس ميالد يوسف فهيم", "01155545767"],
-    ["كيرلس نادي", "01276314822"],
-    ["مارك هاني", "01227435884"],
-    ["مينا جرجس حليم", "01055454404"],
-    ["ابانوب ايليا ملك", "01096682909"],
-    ["ابانوب داود بخيت", "01040749854"],
-    ["بولا ميالد عوض الله", "01223064403"],
-    ["كيرلس فليب فوزي", "01283999238"],
-    ["ماركو عاطف", "01557000318"],
-    ["مارك ايهاب صلاح", "1205495040"],
-    ["مرقص معوض مرقص", "01274469314"],
-    ["نوفير جورج طانيوس داود", "01275827197"],
-    ["نوفير باسلي", ""],
-    ["مينا ايهاب عطالله عطية", "1211593635"],
-    ["أمير رأفت ميخائيل", "012813268600"],
-    ["أمير رأفت وهبة", "01213372769"],
-    ["بافلي هاني عدلي", "01227966400"],
-    ["بولا انطون جرجس", "01008512854"],
-    ["بولا فيليب فوزي", "01283999237"],
-    ["بيشوي جرجس فتحي", ""],
-    ["بيشوي جوزيف وجدي", "01224480641"],
-    ["جورج كرم عبدة", "01201443754"],
-    ["جيوفاني رؤوف وهبة", "01274559637"],
-    ["رامز عماد عبيد", "01104435124"],
-    ["استيفن جورج", "01222269413"],
-    ["فادي عادل عريان", "01278450193"],
-    ["فيلوباتير أسامة رمسيس", "01210452293"],
-    ["فيلوباتير عصام جرجس", "01277906425"],
-    ["فيلوباتير عماد عبيد", "01289379006"],
-    ["فيلوباتير وليد حنين", "01289379006"],
-    ["كيرلس عادل", ""],
-    ["كيرلس نادي فرح", "01284447416"],
-    ["كيرلس هاني فكري", "012772165159"],
-    ["كيفين رامي حنا", "01021179316"],
-    ["كيفين هاني عزيز", "01289828286"],
-    ["مارسيليو سامر سعيد", "01069519459"],
-    ["مايكل طارق عوض", "01275169076"],
-    ["مينا هاني سمير", "0115019418"],
-    ["يوسف مايكل عجيب", "01221788540"],
-    ["يوسف روماني", "01285046844"]
-].map(([name, phone]) => [normalizeRosterStudentName(name), phone]));
+const ROSTER_PHONE_BY_KEY: Record<string, string> = {};
 
 const buildExactCurrentRoster = (existingItems) => {
     const existing = Array.isArray(existingItems) ? existingItems : [];
@@ -1276,7 +1135,7 @@ const PointActions = ({ student, addPoints, onActionAfterAdd = null, fromScan = 
 };
 
 
-const defaultAdminsData = [{"id":"admin_mina_rizk","name":"مينا رزق","pin":"1218","isLocked":false,"failedAttempts":0,"isSuperAdmin":true},{"id":"admin_shady_sameh","name":"شادي سامح","pin":"2846","isLocked":false,"failedAttempts":0,"isSuperAdmin":false},{"id":"admin_mina_moawad","name":"مينا معوض","pin":"7520","isLocked":false,"failedAttempts":0,"isSuperAdmin":false},{"id":"admin_kirollos_raafat","name":"كيرلس رأفت","pin":"7117","isLocked":false,"failedAttempts":0,"isSuperAdmin":false},{"id":"admin_nagy_wiliam","name":"ناجي وليم","pin":"2846","isLocked":false,"failedAttempts":0,"isSuperAdmin":false}];
+const defaultAdminsData = [{"id":"admin_mina_rizk","name":"مينا رزق","pin":"1218","isLocked":false,"failedAttempts":0,"isSuperAdmin":true}];
 
 const mergeStudentsData = (local, dbItems) => {
     if (!Array.isArray(local) || local.length === 0) return dbItems;
@@ -1347,7 +1206,7 @@ const mergeAdminsData = (local, dbItems) => {
 // --- App Component ---
 const App = () => {
     const [students, setStudents] = useState(() => {
-        const local = localStorage.getItem('church_attendance_students_v8');
+        const local = appStorage.getItem('church_attendance_students_v8');
         if (local) {
             try {
                 const parsed = JSON.parse(local);
@@ -1358,7 +1217,7 @@ const App = () => {
         return [];
     });
     const [admins, setAdmins] = useState(() => {
-        const local = localStorage.getItem('church_attendance_admins_v8');
+        const local = appStorage.getItem('church_attendance_admins_v8');
         if (local) {
             try {
                 const parsed = JSON.parse(local);
@@ -1432,16 +1291,16 @@ const App = () => {
     const [deferredPrompt, setDeferredPrompt] = useState(null);
     const [showInstallBtn, setShowInstallBtn] = useState(false);
     const [isInstallDismissed, setIsInstallDismissed] = useState(() => {
-        return localStorage.getItem('pwa_install_dismissed') === 'true';
+        return appStorage.getItem('pwa_install_dismissed') === 'true';
     });
     const [isIOSDevice, setIsIOSDevice] = useState(false);
     const [showIOSInstallGuide, setShowIOSInstallGuide] = useState(false);
 
     useEffect(() => {
         const refreshClientForNewVersion = async () => {
-            const storedVersion = localStorage.getItem('church_attendance_app_version');
+            const storedVersion = appStorage.getItem('church_attendance_app_version');
             if (storedVersion && storedVersion !== APP_VERSION) {
-                localStorage.setItem('church_attendance_app_version', APP_VERSION);
+                appStorage.setItem('church_attendance_app_version', APP_VERSION);
                 try {
                     if ('caches' in window) {
                         const cacheNames = await caches.keys();
@@ -1462,7 +1321,7 @@ const App = () => {
                 return;
             }
 
-            localStorage.setItem('church_attendance_app_version', APP_VERSION);
+            appStorage.setItem('church_attendance_app_version', APP_VERSION);
             try {
                 if ('serviceWorker' in navigator) {
                     const registrations = await navigator.serviceWorker.getRegistrations();
@@ -1480,7 +1339,7 @@ const App = () => {
         const handleBeforeInstallPrompt = (e: any) => {
             e.preventDefault();
             setDeferredPrompt(e);
-            if (localStorage.getItem('pwa_install_dismissed') !== 'true') {
+            if (appStorage.getItem('pwa_install_dismissed') !== 'true') {
                 setShowInstallBtn(true);
             }
         };
@@ -1493,7 +1352,7 @@ const App = () => {
         setIsIOSDevice(isIOS);
 
         if (isIOS && !isStandalone) {
-            if (localStorage.getItem('pwa_install_dismissed') !== 'true') {
+            if (appStorage.getItem('pwa_install_dismissed') !== 'true') {
                 setShowInstallBtn(true);
             }
         } else if (isStandalone) {
@@ -1519,15 +1378,15 @@ const App = () => {
     };
 
     const handleDismissInstall = () => {
-        localStorage.setItem('pwa_install_dismissed', 'true');
+        appStorage.setItem('pwa_install_dismissed', 'true');
         setIsInstallDismissed(true);
         setShowInstallBtn(false);
     };
 
     const isInitialMount = useRef(true);
 
-    const lastStudentsDB = useRef<string>(localStorage.getItem('church_attendance_students_v8') || '[]');
-    const lastAdminsDB = useRef<string>(localStorage.getItem('church_attendance_admins_v8') || '[]');
+    const lastStudentsDB = useRef<string>(appStorage.getItem('church_attendance_students_v8') || '[]');
+    const lastAdminsDB = useRef<string>(appStorage.getItem('church_attendance_admins_v8') || '[]');
     const isRosterMigrationInProgress = useRef(false);
 
     // Initialize Data from Firebase with Offline-Resilient Merging
@@ -1538,7 +1397,8 @@ const App = () => {
                 if (Array.isArray(dbItems)) {
                     const approvedItems = filterToApprovedRoster(dbItems);
                     const storedMigrationVersion = docSnap.data()?.rosterMigrationVersion || '';
-                    const needsSeasonReset = storedMigrationVersion !== CURRENT_ROSTER_MIGRATION_VERSION;
+                    // نسخة البنات: مفيش كشف ثابت، فترحيل كشف الولاد متوقف تمامًا
+                    const needsSeasonReset = false && storedMigrationVersion !== CURRENT_ROSTER_MIGRATION_VERSION;
 
                     if (isRosterMigrationInProgress.current) return;
 
@@ -1561,7 +1421,7 @@ const App = () => {
                             .then(() => {
                                 const str = JSON.stringify(exactRoster);
                                 lastStudentsDB.current = str;
-                                localStorage.setItem('church_attendance_students_v8', str);
+                                appStorage.setItem('church_attendance_students_v8', str);
                                 setStudents(exactRoster);
                                 showToast('✅ تم تحديث كشف الـ84 طالب وتصفير النقاط الحالية وترحيل النقاط القديمة.');
                             })
@@ -1577,7 +1437,7 @@ const App = () => {
 
                     const str = JSON.stringify(approvedItems);
                     lastStudentsDB.current = str;
-                    localStorage.setItem('church_attendance_students_v8', str);
+                    appStorage.setItem('church_attendance_students_v8', str);
                     setStudents(approvedItems);
                     if (JSON.stringify(approvedItems) !== JSON.stringify(dbItems)) {
                         setDoc(doc(db, 'appData', 'students_v8'), { items: approvedItems }, { merge: true })
@@ -1587,7 +1447,7 @@ const App = () => {
                     setStudents([]);
                 }
             } else {
-                const local = localStorage.getItem('church_attendance_students_v8');
+                const local = appStorage.getItem('church_attendance_students_v8');
                 if (local) {
                     try {
                         const parsed = JSON.parse(local);
@@ -1608,13 +1468,13 @@ const App = () => {
                 if (Array.isArray(dbItems)) {
                     const str = JSON.stringify(dbItems);
                     lastAdminsDB.current = str;
-                    localStorage.setItem('church_attendance_admins_v8', str);
+                    appStorage.setItem('church_attendance_admins_v8', str);
                     setAdmins(dbItems);
                 } else {
                     setAdmins(defaultAdminsData);
                 }
             } else {
-                const local = localStorage.getItem('church_attendance_admins_v8');
+                const local = appStorage.getItem('church_attendance_admins_v8');
                 if (local) {
                     try {
                         const parsed = JSON.parse(local);
@@ -1646,7 +1506,7 @@ const App = () => {
 
         const currentStr = JSON.stringify(students);
         if (currentStr !== lastStudentsDB.current) {
-            localStorage.setItem('church_attendance_students_v8', currentStr);
+            appStorage.setItem('church_attendance_students_v8', currentStr);
             setDoc(doc(db, 'appData', 'students_v8'), { items: students }, { merge: true })
                 .catch(err => console.error("Error saving students to Firestore:", err));
             lastStudentsDB.current = currentStr;
@@ -1654,7 +1514,7 @@ const App = () => {
 
         const currentAdminsStr = JSON.stringify(admins);
         if (currentAdminsStr !== lastAdminsDB.current) {
-            localStorage.setItem('church_attendance_admins_v8', currentAdminsStr);
+            appStorage.setItem('church_attendance_admins_v8', currentAdminsStr);
             setDoc(doc(db, 'appData', 'admins_v8'), { items: admins }, { merge: true })
                 .catch(err => console.error("Error saving admins to Firestore:", err));
             lastAdminsDB.current = currentAdminsStr;
@@ -1664,7 +1524,7 @@ const App = () => {
         const saveStudentsData = useCallback((newStudents) => {
         const str = JSON.stringify(newStudents);
         lastStudentsDB.current = str;
-        localStorage.setItem('church_attendance_students_v8', str);
+        appStorage.setItem('church_attendance_students_v8', str);
         setStudents(newStudents);
         setDoc(doc(db, 'appData', 'students_v8'), { items: newStudents }, { merge: true })
             .catch(err => console.error("Error saving students to Firestore:", err));
@@ -1673,7 +1533,7 @@ const App = () => {
     const saveAdminsData = useCallback((newAdmins) => {
         const str = JSON.stringify(newAdmins);
         lastAdminsDB.current = str;
-        localStorage.setItem('church_attendance_admins_v8', str);
+        appStorage.setItem('church_attendance_admins_v8', str);
         setAdmins(newAdmins);
         setDoc(doc(db, 'appData', 'admins_v8'), { items: newAdmins }, { merge: true })
             .catch(err => console.error("Error saving admins to Firestore:", err));
@@ -1695,7 +1555,7 @@ const App = () => {
         // Migrate Students
         versions.forEach(v => {
             const key = `church_attendance_students_${v}`;
-            const local = localStorage.getItem(key);
+            const local = appStorage.getItem(key);
             if (local) {
                 try {
                     const parsed = JSON.parse(local);
@@ -1703,7 +1563,7 @@ const App = () => {
                         currentStudents = mergeStudentsData(currentStudents, parsed);
                         migratedStudents = true;
                         // Clear migrated key to prevent repeated merge
-                        localStorage.removeItem(key);
+                        appStorage.removeItem(key);
                     }
                 } catch (e) {
                     console.error(`Failed to migrate students ${v}:`, e);
@@ -1714,7 +1574,7 @@ const App = () => {
         // Migrate Admins
         versions.forEach(v => {
             const key = `church_attendance_admins_${v}`;
-            const local = localStorage.getItem(key);
+            const local = appStorage.getItem(key);
             if (local) {
                 try {
                     const parsed = JSON.parse(local);
@@ -1722,7 +1582,7 @@ const App = () => {
                         currentAdmins = mergeAdminsData(currentAdmins, parsed);
                         migratedAdmins = true;
                         // Clear migrated key to prevent repeated merge
-                        localStorage.removeItem(key);
+                        appStorage.removeItem(key);
                     }
                 } catch (e) {
                     console.error(`Failed to migrate admins ${v}:`, e);
@@ -1734,7 +1594,7 @@ const App = () => {
             setStudents(currentStudents);
             const mergedStr = JSON.stringify(currentStudents);
             lastStudentsDB.current = mergedStr;
-            localStorage.setItem('church_attendance_students_v8', mergedStr);
+            appStorage.setItem('church_attendance_students_v8', mergedStr);
             setDoc(doc(db, 'appData', 'students_v8'), { items: currentStudents }, { merge: true })
                 .then(() => {
                     showToast("🎉 تم استيراد ودمج سجلات الطلاب القديمة من جهازك بنجاح!");
@@ -1746,7 +1606,7 @@ const App = () => {
             setAdmins(currentAdmins);
             const mergedStr = JSON.stringify(currentAdmins);
             lastAdminsDB.current = mergedStr;
-            localStorage.setItem('church_attendance_admins_v8', mergedStr);
+            appStorage.setItem('church_attendance_admins_v8', mergedStr);
             setDoc(doc(db, 'appData', 'admins_v8'), { items: currentAdmins }, { merge: true })
                 .catch(err => console.error("Error saving migrated admins:", err));
         }
@@ -2267,7 +2127,7 @@ const App = () => {
                             : [],
                     }));
                     setStudents(importedStudents);
-                    showToast('تم استعادة بيانات شباب الأنبا رويس بنجاح.');
+                    showToast('تم استعادة بيانات بنات الأنبا رويس بنجاح.');
                 }
 
                 if (data.admins !== undefined) {
@@ -2860,7 +2720,7 @@ const App = () => {
             <div className="max-w-4xl mx-auto">
                 <header className="flex justify-between items-center mb-6 pb-4 border-b border-indigo-800/50">
                     <div>
-                        <h1 className="text-3xl md:text-4xl font-bold text-amber-400 tracking-wider">Points ثانوي بنين</h1>
+                        <h1 className="text-3xl md:text-4xl font-bold text-amber-400 tracking-wider">Points ثانوي بنات</h1>
                         <p className="text-lg text-indigo-300 mt-1">اجتماع الأنبا رويس - كنيسة مارمينا</p>
                     </div>
                     <div className="flex items-center gap-2 md:gap-4">
@@ -2876,7 +2736,7 @@ const App = () => {
                                         const registrations = await navigator.serviceWorker.getRegistrations();
                                         await Promise.all(registrations.map(registration => registration.unregister()));
                                     }
-                                    localStorage.setItem('church_attendance_app_version', APP_VERSION);
+                                    appStorage.setItem('church_attendance_app_version', APP_VERSION);
                                     window.location.reload();
                                 } catch (e) {
                                     console.error('Manual cache cleanup failed:', e);
@@ -3005,7 +2865,7 @@ const App = () => {
                     <div className="mb-6 bg-indigo-900/70 p-1.5 rounded-xl flex items-center gap-2 border border-indigo-800/50 overflow-x-auto">
                         <button onClick={() => setActiveView('students')} className={`flex-1 min-w-[120px] text-center rounded-lg py-2 font-bold flex items-center justify-center gap-2 transition-colors ${activeView === 'students' ? 'bg-indigo-700 text-amber-400' : 'text-indigo-300 hover:bg-indigo-800/50'}`}>
                             <UserGroupIcon className="w-5 h-5" />
-                            <span className="whitespace-nowrap">شباب الأنبا رويس ({students.length})</span>
+                            <span className="whitespace-nowrap">بنات الأنبا رويس ({students.length})</span>
                         </button>
                          <button onClick={() => setActiveView('leaderboard')} className={`flex-1 min-w-[120px] text-center rounded-lg py-2 font-bold flex items-center justify-center gap-2 transition-colors ${activeView === 'leaderboard' ? 'bg-indigo-700 text-amber-400' : 'text-indigo-300 hover:bg-indigo-800/50'}`}>
                              <TrophyIcon className="w-5 h-5" />
@@ -3846,7 +3706,7 @@ const App = () => {
                                 <div className="bg-indigo-950/40 border border-indigo-800/50 rounded-2xl p-12 text-center text-indigo-300 space-y-3">
                                     <div className="text-4xl">🎖️✨</div>
                                     <h4 className="text-lg font-bold text-white">لا توجد تنبيهات تطابق البحث أو الفلتر المحدد</h4>
-                                    <p className="text-xs text-indigo-400">ستظهر هنا أي أوسمة جديدة يحصل عليها الشباب تلقائياً لمتابعتها وإضافة نقاطها بضغطة زر.</p>
+                                    <p className="text-xs text-indigo-400">ستظهر هنا أي أوسمة جديدة تحصل عليها البنات تلقائياً لمتابعتها وإضافة نقاطها بضغطة زر.</p>
                                 </div>
                             ) : (
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

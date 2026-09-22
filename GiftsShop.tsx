@@ -143,8 +143,8 @@ const GiftsShopWidget: React.FC = () => {
         style={{
           position: 'fixed', bottom: '90px', left: '16px', zIndex: 9998,
           width: '56px', height: '56px', borderRadius: '50%',
-          background: 'linear-gradient(135deg, #f59e0b, #d97706)',
-          boxShadow: '0 4px 14px rgba(245,158,11,0.5)',
+          background: 'linear-gradient(135deg, #f7739c, #e0527f)',
+          boxShadow: '0 4px 14px rgba(247,115,156,0.5)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontSize: '28px', border: 'none', cursor: 'pointer',
         }}
@@ -158,18 +158,18 @@ const GiftsShopWidget: React.FC = () => {
         <div
           style={{
             position: 'fixed', inset: 0, zIndex: 9999,
-            background: '#0f0a2e', overflowY: 'auto',
+            background: '#17061a', overflowY: 'auto',
             fontFamily: 'inherit', direction: 'rtl',
           }}
         >
           {/* الهيدر */}
           <div style={{
             position: 'sticky', top: 0, zIndex: 10,
-            background: '#1e1b4b', padding: '14px 16px',
+            background: '#270c24', padding: '14px 16px',
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            borderBottom: '1px solid #3730a3',
+            borderBottom: '1px solid #56204a',
           }}>
-            <h1 style={{ color: '#fbbf24', fontSize: '20px', fontWeight: 800, margin: 0 }}>
+            <h1 style={{ color: '#ff9ebb', fontSize: '20px', fontWeight: 800, margin: 0 }}>
               🎁 متجر الهدايا
             </h1>
             <div style={{ display: 'flex', gap: '8px' }}>
@@ -179,7 +179,7 @@ const GiftsShopWidget: React.FC = () => {
                 </span>
               )}
               <button onClick={() => setOpen(false)}
-                style={{ background: '#312e81', border: 'none', color: 'white', borderRadius: '8px', width: '34px', height: '34px', fontSize: '18px' }}>
+                style={{ background: '#421a3c', border: 'none', color: 'white', borderRadius: '8px', width: '34px', height: '34px', fontSize: '18px' }}>
                 ✕
               </button>
             </div>
@@ -191,16 +191,16 @@ const GiftsShopWidget: React.FC = () => {
               <button onClick={() => setAdminTab('products')}
                 style={{
                   flex: 1, padding: '10px', borderRadius: '10px', fontWeight: 700, fontSize: '14px', border: 'none',
-                  background: adminTab === 'products' ? '#fbbf24' : '#312e81',
-                  color: adminTab === 'products' ? '#1e1b4b' : '#c7d2fe',
+                  background: adminTab === 'products' ? '#ff9ebb' : '#421a3c',
+                  color: adminTab === 'products' ? '#270c24' : '#ecc9e4',
                 }}>
                 📦 المنتجات ({shop.products.length})
               </button>
               <button onClick={() => setAdminTab('orders')}
                 style={{
                   flex: 1, padding: '10px', borderRadius: '10px', fontWeight: 700, fontSize: '14px', border: 'none',
-                  background: adminTab === 'orders' ? '#fbbf24' : '#312e81',
-                  color: adminTab === 'orders' ? '#1e1b4b' : '#c7d2fe',
+                  background: adminTab === 'orders' ? '#ff9ebb' : '#421a3c',
+                  color: adminTab === 'orders' ? '#270c24' : '#ecc9e4',
                 }}>
                 📋 الطلبات ({shop.orders.filter(o => o.status === 'reserved').length})
               </button>
@@ -208,7 +208,7 @@ const GiftsShopWidget: React.FC = () => {
           )}
 
           <div style={{ padding: '16px' }}>
-            {loading && <p style={{ color: '#a5b4fc', textAlign: 'center' }}>جاري التحميل...</p>}
+            {loading && <p style={{ color: '#dda1cf', textAlign: 'center' }}>جاري التحميل...</p>}
 
             {/* عرض المنتجات (للجميع) */}
             {(!isAdmin || adminTab === 'products') && !loading && (
@@ -216,13 +216,13 @@ const GiftsShopWidget: React.FC = () => {
                 {isAdmin && (
                   <button
                     onClick={() => setEditingProduct({ id: genId(), name: '', images: [], points: 100, sizes: [{ label: 'عادي', qty: 1 }] })}
-                    style={{ width: '100%', padding: '14px', marginBottom: '16px', borderRadius: '12px', border: '2px dashed #4338ca', background: 'transparent', color: '#a5b4fc', fontWeight: 700, fontSize: '15px' }}>
+                    style={{ width: '100%', padding: '14px', marginBottom: '16px', borderRadius: '12px', border: '2px dashed #6c2659', background: 'transparent', color: '#dda1cf', fontWeight: 700, fontSize: '15px' }}>
                     + إضافة هدية جديدة
                   </button>
                 )}
 
                 {shop.products.length === 0 && (
-                  <p style={{ color: '#818cf8', textAlign: 'center', marginTop: '40px' }}>
+                  <p style={{ color: '#c271ae', textAlign: 'center', marginTop: '40px' }}>
                     لا توجد هدايا متاحة حاليًا
                   </p>
                 )}
@@ -232,10 +232,10 @@ const GiftsShopWidget: React.FC = () => {
                     const totalQty = product.sizes.reduce((s, x) => s + x.qty, 0);
                     return (
                       <div key={product.id} style={{
-                        background: '#1e1b4b', borderRadius: '16px', overflow: 'hidden',
-                        border: '1px solid #312e81', display: 'flex', flexDirection: 'column',
+                        background: '#270c24', borderRadius: '16px', overflow: 'hidden',
+                        border: '1px solid #421a3c', display: 'flex', flexDirection: 'column',
                       }}>
-                        <div style={{ width: '100%', aspectRatio: '1', background: '#312e81', position: 'relative' }}>
+                        <div style={{ width: '100%', aspectRatio: '1', background: '#421a3c', position: 'relative' }}>
                           {product.images?.[0] ? (
                             <img src={product.images[0]} alt={product.name} onClick={() => setGalleryProduct(product)}
                               style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }} />
@@ -262,7 +262,7 @@ const GiftsShopWidget: React.FC = () => {
                         </div>
                         <div style={{ padding: '10px' }}>
                           <p style={{ color: 'white', fontWeight: 700, fontSize: '14px', margin: '0 0 4px' }}>{product.name}</p>
-                          <p style={{ color: '#fbbf24', fontWeight: 800, fontSize: '14px', margin: '0 0 8px' }}>
+                          <p style={{ color: '#ff9ebb', fontWeight: 800, fontSize: '14px', margin: '0 0 8px' }}>
                             {product.points} نقطة
                           </p>
                           <button
@@ -270,7 +270,7 @@ const GiftsShopWidget: React.FC = () => {
                             onClick={() => setOrderingProduct(product)}
                             style={{
                               width: '100%', padding: '8px', borderRadius: '8px', border: 'none', fontWeight: 700, fontSize: '13px',
-                              background: totalQty === 0 ? '#4b5563' : '#f59e0b', color: totalQty === 0 ? '#9ca3af' : '#1e1b4b',
+                              background: totalQty === 0 ? '#4b5563' : '#f7739c', color: totalQty === 0 ? '#9ca3af' : '#270c24',
                             }}>
                             {totalQty === 0 ? 'غير متاح' : 'اطلب الآن'}
                           </button>
@@ -285,21 +285,21 @@ const GiftsShopWidget: React.FC = () => {
             {/* الطلبات (أدمن فقط) */}
             {isAdmin && adminTab === 'orders' && !loading && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                {shop.orders.length === 0 && <p style={{ color: '#818cf8', textAlign: 'center' }}>لا توجد طلبات بعد</p>}
+                {shop.orders.length === 0 && <p style={{ color: '#c271ae', textAlign: 'center' }}>لا توجد طلبات بعد</p>}
                 {[...shop.orders].reverse().map(order => (
-                  <div key={order.id} style={{ background: '#1e1b4b', borderRadius: '12px', padding: '12px', border: '1px solid #312e81' }}>
+                  <div key={order.id} style={{ background: '#270c24', borderRadius: '12px', padding: '12px', border: '1px solid #421a3c' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
                       <span style={{ color: 'white', fontWeight: 700 }}>{order.productName} ({order.size})</span>
                       <span style={{
                         fontSize: '11px', fontWeight: 700, padding: '2px 8px', borderRadius: '6px',
-                        background: order.status === 'reserved' ? '#f59e0b' : order.status === 'delivered' ? '#059669' : '#dc2626',
+                        background: order.status === 'reserved' ? '#f7739c' : order.status === 'delivered' ? '#059669' : '#dc2626',
                         color: 'white',
                       }}>
                         {order.status === 'reserved' ? 'محجوز' : order.status === 'delivered' ? 'تم التسليم' : 'ملغي'}
                       </span>
                     </div>
-                    <p style={{ color: '#c7d2fe', fontSize: '13px', margin: '2px 0' }}>👤 {order.studentName} — 📱 {order.studentPhone}</p>
-                    <p style={{ color: '#fbbf24', fontSize: '13px', margin: '2px 0 10px' }}>💰 {order.points} نقطة</p>
+                    <p style={{ color: '#ecc9e4', fontSize: '13px', margin: '2px 0' }}>👤 {order.studentName} — 📱 {order.studentPhone}</p>
+                    <p style={{ color: '#ff9ebb', fontSize: '13px', margin: '2px 0 10px' }}>💰 {order.points} نقطة</p>
                     {order.status === 'reserved' && (
                       <div style={{ display: 'flex', gap: '8px' }}>
                         <button
@@ -439,7 +439,7 @@ const GiftsShopWidget: React.FC = () => {
 // ============================================================
 const Overlay: React.FC<{ onClose: () => void; children: React.ReactNode }> = ({ onClose, children }) => (
   <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}>
-    <div onClick={e => e.stopPropagation()} style={{ background: '#1e1b4b', borderRadius: '16px', padding: '20px', width: '100%', maxWidth: '380px', border: '1px solid #312e81', direction: 'rtl' }}>
+    <div onClick={e => e.stopPropagation()} style={{ background: '#270c24', borderRadius: '16px', padding: '20px', width: '100%', maxWidth: '380px', border: '1px solid #421a3c', direction: 'rtl' }}>
       {children}
     </div>
   </div>
@@ -471,7 +471,7 @@ const compressImage = (file: File): Promise<string> => new Promise((resolve, rej
 const ProductEditor: React.FC<{ product: Product; onClose: () => void; onSave: (p: Product) => void; onDelete: () => void }> = ({ product, onClose, onSave, onDelete }) => {
   const [p, setP] = useState<Product>({ ...product, images: product.images || [] });
   const [uploading, setUploading] = useState(false);
-  const inputStyle: React.CSSProperties = { width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #4338ca', background: '#0f0a2e', color: 'white', marginBottom: '10px', fontSize: '14px' };
+  const inputStyle: React.CSSProperties = { width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #6c2659', background: '#17061a', color: 'white', marginBottom: '10px', fontSize: '14px' };
 
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -492,11 +492,11 @@ const ProductEditor: React.FC<{ product: Product; onClose: () => void; onSave: (
 
   return (
     <Overlay onClose={onClose}>
-      <h2 style={{ color: '#fbbf24', fontWeight: 800, marginBottom: '12px' }}>{product.name ? 'تعديل هدية' : 'هدية جديدة'}</h2>
-      <label style={{ color: '#c7d2fe', fontSize: '12px' }}>اسم الهدية</label>
+      <h2 style={{ color: '#ff9ebb', fontWeight: 800, marginBottom: '12px' }}>{product.name ? 'تعديل هدية' : 'هدية جديدة'}</h2>
+      <label style={{ color: '#ecc9e4', fontSize: '12px' }}>اسم الهدية</label>
       <input style={inputStyle} value={p.name} onChange={e => setP({ ...p, name: e.target.value })} placeholder="تيشيرت الخدمة" />
 
-      <label style={{ color: '#c7d2fe', fontSize: '12px' }}>الصور (تقدر ترفع أكتر من صورة للهدية الواحدة)</label>
+      <label style={{ color: '#ecc9e4', fontSize: '12px' }}>الصور (تقدر ترفع أكتر من صورة للهدية الواحدة)</label>
       {p.images.length > 0 && (
         <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '8px' }}>
           {p.images.map((img, i) => (
@@ -510,7 +510,7 @@ const ProductEditor: React.FC<{ product: Product; onClose: () => void; onSave: (
       )}
       <label style={{
         display: 'block', textAlign: 'center', padding: '14px', marginBottom: '8px', borderRadius: '10px',
-        border: '2px dashed #4338ca', color: '#a5b4fc', fontWeight: 700, fontSize: '13px', cursor: 'pointer',
+        border: '2px dashed #6c2659', color: '#dda1cf', fontWeight: 700, fontSize: '13px', cursor: 'pointer',
       }}>
         {uploading ? 'جاري المعالجة...' : '📷 اختر صور من الموبايل / الكمبيوتر'}
         <input type="file" accept="image/*" multiple disabled={uploading} onChange={e => handleFiles(e.target.files)} style={{ display: 'none' }} />
@@ -519,7 +519,7 @@ const ProductEditor: React.FC<{ product: Product; onClose: () => void; onSave: (
       <div style={{ display: 'flex', gap: '6px', marginBottom: '10px' }}>
         <input
           id="img-url-input"
-          style={{ flex: 1, padding: '10px', borderRadius: '8px', border: '1px solid #4338ca', background: '#0f0a2e', color: 'white', fontSize: '13px' }}
+          style={{ flex: 1, padding: '10px', borderRadius: '8px', border: '1px solid #6c2659', background: '#17061a', color: 'white', fontSize: '13px' }}
           placeholder="أو الصق رابط صورة (imgbb.com مثلاً) بجودة أعلى"
         />
         <button
@@ -529,14 +529,14 @@ const ProductEditor: React.FC<{ product: Product; onClose: () => void; onSave: (
             const url = el?.value?.trim();
             if (url) { setP(prev => ({ ...prev, images: [...prev.images, url] })); el.value = ''; }
           }}
-          style={{ padding: '0 16px', borderRadius: '8px', border: 'none', background: '#312e81', color: 'white', fontWeight: 700, fontSize: '13px' }}>
+          style={{ padding: '0 16px', borderRadius: '8px', border: 'none', background: '#421a3c', color: 'white', fontWeight: 700, fontSize: '13px' }}>
           إضافة
         </button>
       </div>
 
-      <label style={{ color: '#c7d2fe', fontSize: '12px' }}>تكلفة النقط</label>
+      <label style={{ color: '#ecc9e4', fontSize: '12px' }}>تكلفة النقط</label>
       <input style={inputStyle} type="number" value={p.points} onChange={e => setP({ ...p, points: Number(e.target.value) || 0 })} />
-      <label style={{ color: '#c7d2fe', fontSize: '12px' }}>المقاسات والكميات (مقاس:كمية، مفصولة بفاصلة)</label>
+      <label style={{ color: '#ecc9e4', fontSize: '12px' }}>المقاسات والكميات (مقاس:كمية، مفصولة بفاصلة)</label>
       <input
         style={inputStyle}
         defaultValue={p.sizes.map(s => `${s.label}:${s.qty}`).join(', ')}
@@ -550,9 +550,9 @@ const ProductEditor: React.FC<{ product: Product; onClose: () => void; onSave: (
         placeholder="S:3, M:5, L:2"
       />
       <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
-        <button onClick={() => onSave(p)} disabled={!p.name || uploading} style={{ flex: 1, padding: '12px', borderRadius: '10px', border: 'none', background: '#f59e0b', color: '#1e1b4b', fontWeight: 800 }}>حفظ</button>
+        <button onClick={() => onSave(p)} disabled={!p.name || uploading} style={{ flex: 1, padding: '12px', borderRadius: '10px', border: 'none', background: '#f7739c', color: '#270c24', fontWeight: 800 }}>حفظ</button>
         {product.name && <button onClick={onDelete} style={{ padding: '12px 16px', borderRadius: '10px', border: 'none', background: '#dc2626', color: 'white', fontWeight: 700 }}>حذف</button>}
-        <button onClick={onClose} style={{ padding: '12px 16px', borderRadius: '10px', border: '1px solid #4338ca', background: 'transparent', color: '#c7d2fe' }}>إلغاء</button>
+        <button onClick={onClose} style={{ padding: '12px 16px', borderRadius: '10px', border: '1px solid #6c2659', background: 'transparent', color: '#ecc9e4' }}>إلغاء</button>
       </div>
     </Overlay>
   );
@@ -569,7 +569,7 @@ const OrderForm: React.FC<{ product: Product; students: any[]; onClose: () => vo
   const confirmationRef = useRef<ConfirmationResult | null>(null);
   const recaptchaRef = useRef<HTMLDivElement>(null);
 
-  const inputStyle: React.CSSProperties = { width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #4338ca', background: '#0f0a2e', color: 'white', marginBottom: '10px', fontSize: '14px' };
+  const inputStyle: React.CSSProperties = { width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #6c2659', background: '#17061a', color: 'white', marginBottom: '10px', fontSize: '14px' };
 
   const normalized = normalizePhone(phone);
   const matchedStudent = normalized.length >= 7 ? students.find(s => normalizePhone(s.phone) === normalized) : null;
@@ -611,25 +611,25 @@ const OrderForm: React.FC<{ product: Product; students: any[]; onClose: () => vo
   return (
     <Overlay onClose={onClose}>
       <div ref={recaptchaRef} />
-      <h2 style={{ color: '#fbbf24', fontWeight: 800, marginBottom: '4px' }}>{product.name}</h2>
-      <p style={{ color: '#a5b4fc', marginBottom: '12px' }}>{product.points} نقطة</p>
+      <h2 style={{ color: '#ff9ebb', fontWeight: 800, marginBottom: '4px' }}>{product.name}</h2>
+      <p style={{ color: '#dda1cf', marginBottom: '12px' }}>{product.points} نقطة</p>
 
       {step === 'phone' && (
         <>
           {availableSizes.length > 1 && (
             <>
-              <label style={{ color: '#c7d2fe', fontSize: '12px' }}>اختر المقاس</label>
+              <label style={{ color: '#ecc9e4', fontSize: '12px' }}>اختر المقاس</label>
               <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
                 {availableSizes.map(s => (
                   <button key={s.label} onClick={() => setSize(s.label)}
-                    style={{ padding: '8px 16px', borderRadius: '8px', border: size === s.label ? '2px solid #fbbf24' : '1px solid #4338ca', background: size === s.label ? '#312e81' : 'transparent', color: 'white', fontWeight: 700 }}>
+                    style={{ padding: '8px 16px', borderRadius: '8px', border: size === s.label ? '2px solid #ff9ebb' : '1px solid #6c2659', background: size === s.label ? '#421a3c' : 'transparent', color: 'white', fontWeight: 700 }}>
                     {s.label}
                   </button>
                 ))}
               </div>
             </>
           )}
-          <label style={{ color: '#c7d2fe', fontSize: '12px' }}>رقم موبايلك (المسجل في الحضور)</label>
+          <label style={{ color: '#ecc9e4', fontSize: '12px' }}>رقم موبايلك (المسجل في الحضور)</label>
           <input style={inputStyle} value={phone} onChange={e => setPhone(e.target.value)} placeholder="01xxxxxxxxx" inputMode="tel" />
 
           {normalized.length >= 7 && !matchedStudent && (
@@ -645,7 +645,7 @@ const OrderForm: React.FC<{ product: Product; students: any[]; onClose: () => vo
           <button
             disabled={!matchedStudent || !enough || !size || sending}
             onClick={sendCode}
-            style={{ width: '100%', padding: '12px', borderRadius: '10px', border: 'none', background: (!matchedStudent || !enough || !size) ? '#4b5563' : '#f59e0b', color: '#1e1b4b', fontWeight: 800, marginTop: '4px' }}>
+            style={{ width: '100%', padding: '12px', borderRadius: '10px', border: 'none', background: (!matchedStudent || !enough || !size) ? '#4b5563' : '#f7739c', color: '#270c24', fontWeight: 800, marginTop: '4px' }}>
             {sending ? 'جاري الإرسال...' : 'إرسال كود التحقق'}
           </button>
         </>
@@ -653,7 +653,7 @@ const OrderForm: React.FC<{ product: Product; students: any[]; onClose: () => vo
 
       {step === 'code' && (
         <>
-          <p style={{ color: '#c7d2fe', fontSize: '13px', marginBottom: '10px' }}>
+          <p style={{ color: '#ecc9e4', fontSize: '13px', marginBottom: '10px' }}>
             بعتنا كود على {phone}، اكتبه هنا:
           </p>
           <input style={inputStyle} value={code} onChange={e => setCode(e.target.value)} placeholder="123456" inputMode="numeric" />
@@ -661,7 +661,7 @@ const OrderForm: React.FC<{ product: Product; students: any[]; onClose: () => vo
           <button
             disabled={!code || sending}
             onClick={verifyAndConfirm}
-            style={{ width: '100%', padding: '12px', borderRadius: '10px', border: 'none', background: !code ? '#4b5563' : '#f59e0b', color: '#1e1b4b', fontWeight: 800 }}>
+            style={{ width: '100%', padding: '12px', borderRadius: '10px', border: 'none', background: !code ? '#4b5563' : '#f7739c', color: '#270c24', fontWeight: 800 }}>
             {sending ? 'جاري التأكيد...' : 'تأكيد وخصم النقط'}
           </button>
         </>
@@ -689,7 +689,7 @@ const ImageGallery: React.FC<{ product: Product; onClose: () => void }> = ({ pro
         )}
       </div>
       <a href={current} download onClick={e => e.stopPropagation()}
-        style={{ marginTop: '14px', background: '#f59e0b', color: '#1e1b4b', fontWeight: 800, padding: '10px 20px', borderRadius: '10px', textDecoration: 'none', fontSize: '14px' }}>
+        style={{ marginTop: '14px', background: '#f7739c', color: '#270c24', fontWeight: 800, padding: '10px 20px', borderRadius: '10px', textDecoration: 'none', fontSize: '14px' }}>
         ⬇ تحميل الصورة
       </a>
     </div>

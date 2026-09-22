@@ -1,4 +1,5 @@
-const CACHE_NAME = 'sec-boys-v8-2026-09-21';
+const CACHE_PREFIX = 'sec-girls-';
+const CACHE_NAME = CACHE_PREFIX + 'v1-2026-09-22';
 const BASE_URL = new URL('./', self.registration.scope).toString();
 const ASSETS = [
   BASE_URL,
@@ -40,7 +41,7 @@ self.addEventListener('activate', (event) => {
     caches.keys()
       .then((keys) => Promise.all(
         keys
-          .filter((key) => key !== CACHE_NAME)
+          .filter((key) => key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME)
           .map((key) => caches.delete(key))
       ))
       .then(() => self.clients.claim())
