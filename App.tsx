@@ -2127,7 +2127,7 @@ const App = () => {
                             : [],
                     }));
                     setStudents(importedStudents);
-                    showToast('تم استعادة بيانات بنات الأنبا رويس بنجاح.');
+                    showToast('تم استعادة بيانات شابات تي بارثينوس بنجاح.');
                 }
 
                 if (data.admins !== undefined) {
@@ -2721,7 +2721,7 @@ const App = () => {
                 <header className="flex justify-between items-center mb-6 pb-4 border-b border-indigo-800/50">
                     <div>
                         <h1 className="text-3xl md:text-4xl font-bold text-amber-400 tracking-wider">Points ثانوي بنات</h1>
-                        <p className="text-lg text-indigo-300 mt-1">اجتماع الأنبا رويس - كنيسة مارمينا</p>
+                        <p className="text-lg text-indigo-300 mt-1">تي بارثينوس لشابات ثانوي - كنيسة مارمينا مدينة الأحلام</p>
                     </div>
                     <div className="flex items-center gap-2 md:gap-4">
                         <button
@@ -2865,7 +2865,7 @@ const App = () => {
                     <div className="mb-6 bg-indigo-900/70 p-1.5 rounded-xl flex items-center gap-2 border border-indigo-800/50 overflow-x-auto">
                         <button onClick={() => setActiveView('students')} className={`flex-1 min-w-[120px] text-center rounded-lg py-2 font-bold flex items-center justify-center gap-2 transition-colors ${activeView === 'students' ? 'bg-indigo-700 text-amber-400' : 'text-indigo-300 hover:bg-indigo-800/50'}`}>
                             <UserGroupIcon className="w-5 h-5" />
-                            <span className="whitespace-nowrap">بنات الأنبا رويس ({students.length})</span>
+                            <span className="whitespace-nowrap">شابات تي بارثينوس ({students.length})</span>
                         </button>
                          <button onClick={() => setActiveView('leaderboard')} className={`flex-1 min-w-[120px] text-center rounded-lg py-2 font-bold flex items-center justify-center gap-2 transition-colors ${activeView === 'leaderboard' ? 'bg-indigo-700 text-amber-400' : 'text-indigo-300 hover:bg-indigo-800/50'}`}>
                              <TrophyIcon className="w-5 h-5" />
@@ -3706,7 +3706,7 @@ const App = () => {
                                 <div className="bg-indigo-950/40 border border-indigo-800/50 rounded-2xl p-12 text-center text-indigo-300 space-y-3">
                                     <div className="text-4xl">🎖️✨</div>
                                     <h4 className="text-lg font-bold text-white">لا توجد تنبيهات تطابق البحث أو الفلتر المحدد</h4>
-                                    <p className="text-xs text-indigo-400">ستظهر هنا أي أوسمة جديدة تحصل عليها البنات تلقائياً لمتابعتها وإضافة نقاطها بضغطة زر.</p>
+                                    <p className="text-xs text-indigo-400">ستظهر هنا أي أوسمة جديدة تحصل عليها الشابات تلقائياً لمتابعتها وإضافة نقاطها بضغطة زر.</p>
                                 </div>
                             ) : (
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
