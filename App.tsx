@@ -2720,8 +2720,8 @@ const App = () => {
             <div className="max-w-4xl mx-auto">
                 <header className="flex justify-between items-center mb-6 pb-4 border-b border-indigo-800/50">
                     <div>
-                        <h1 className="text-3xl md:text-4xl font-bold text-amber-400 tracking-wider">Points ثانوي بنات</h1>
-                        <p className="text-lg text-indigo-300 mt-1">تي بارثينوس لشابات ثانوي - كنيسة مارمينا مدينة الأحلام</p>
+                        <h1 className="text-3xl md:text-4xl font-bold text-amber-400 tracking-wider">اجتماع تي بارثينوس - شابات ثانوي</h1>
+                        <p className="text-lg text-indigo-300 mt-1">كنيسة الشهيد العظيم مارمينا مدينة الأحلام</p>
                     </div>
                     <div className="flex items-center gap-2 md:gap-4">
                         <button
