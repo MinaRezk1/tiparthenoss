@@ -2511,11 +2511,9 @@ const App = () => {
 
     const isAuthenticated = !!loggedInAdmin;
     const isSuperAdmin = loggedInAdmin?.isSuperAdmin;
-    const isMinaAdmin = useMemo(() => {
-        if (!loggedInAdmin || !loggedInAdmin.name) return false;
-        const name = loggedInAdmin.name.trim();
-        return name.includes('مينا') || name.toLowerCase().includes('mina');
-    }, [loggedInAdmin]);
+    // نسخة البنات: الصلاحيات الخاصة (متجر الهدايا، التحكم في النقاط، الأوسمة) للسوبر أدمن بس،
+    // مش لأي خادم اسمه فيه "مينا".
+    const isMinaAdmin = useMemo(() => Boolean(loggedInAdmin?.isSuperAdmin), [loggedInAdmin]);
 
     // بث حالة دخول مينا لملف الهدايا (GiftsShop.tsx) المستقل - إضافة فقط، مش بتغيّر أي منطق موجود
     useEffect(() => {
@@ -3949,7 +3947,7 @@ const App = () => {
                     <button
                         onClick={() => setAddStudentModalOpen(true)}
                         className="bg-green-600 hover:bg-green-700 text-white p-4 rounded-full shadow-lg hover:shadow-xl transition-all duration-300 ease-in-out transform hover:scale-110"
-                        aria-label="إضافة شاب جديد"
+                        aria-label="إضافة شابة جديدة"
                     >
                         <UserPlusIcon className="w-8 h-8" />
                     </button>
@@ -4151,7 +4149,7 @@ const App = () => {
                 </div>
             </Modal>
 
-            <Modal isOpen={isAddStudentModalOpen} onClose={() => setAddStudentModalOpen(false)} title="إضافة شاب جديد">
+            <Modal isOpen={isAddStudentModalOpen} onClose={() => setAddStudentModalOpen(false)} title="إضافة شابة جديدة">
                  <div className="space-y-4">
                     <div>
                          <label htmlFor="new-student-name" className="block text-sm font-medium text-indigo-300 mb-2">الاسم</label>
