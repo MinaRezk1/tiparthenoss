@@ -1,0 +1,10 @@
+{
+  "projectId": "attendance-rois",
+  "appId": "1:665929849181:web:0b6a995e3b62e674eeb0b4",
+  "apiKey": "AIzaSyAYMKZe9dS3HhVED3GLwaMKgRwQvodCgsw",
+  "authDomain": "attendance-rois.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "attendance-rois.firebasestorage.app",
+  "messagingSenderId": "665929849181",
+  "measurementId": ""
+}
