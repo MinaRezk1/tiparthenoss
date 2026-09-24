@@ -1,11 +1,35 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /appData/{document} {
-      allow read, write: if true;
+
+    // بيانات البنات والنقط: مينفعش تتمسح، ومينفعش تتكتب فاضية أو ناقصة
+    // (البنات حاليًا 73، والحد الأدنى 40 عشان لو القايمة قلّت شوية الحفظ مايقفش)
+    match /appData/students_v9 {
+      allow read: if true;
+      allow create, update: if request.resource.data.items is list
+                            && request.resource.data.items.size() >= 40;
+      allow delete: if false;
     }
-    match /shop/{document} {
-      allow read, write: if true;
+
+    // باقي بيانات الموقع (الخدام، النسخ القديمة زي students_v8): تتقري وتتعدّل، بس مينفعش تتمسح
+    match /appData/{docId} {
+      allow read: if true;
+      allow create, update: if docId != 'students_v9';
+      allow delete: if false;
+    }
+
+    // المتجر: مينفعش يتمسح
+    match /shop/{docId} {
+      allow read, create, update: if true;
+      allow delete: if false;
+    }
+
+    // صور الهدايا: كل صورة أقل من الحد، ومسموح تتمسح لما الهدية تتمسح
+    match /shopImages/{imageId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.data is string
+                            && request.resource.data.data.size() < 900000;
+      allow delete: if true;
     }
   }
 }

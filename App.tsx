@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import './index.css';
 import { db } from './firebase';
 import './GiftsShop';
-import { doc, onSnapshot, setDoc } from 'firebase/firestore';
+import { doc, onSnapshot, setDoc, runTransaction } from 'firebase/firestore';
 
 
 
@@ -20,7 +20,7 @@ const appStorage = {
 const generateId = () => `_${Math.random().toString(36).substring(2, 11)}`;
 
 const CAIRO_TIMEZONE = 'Africa/Cairo';
-const APP_VERSION = '2026.09.19.9';
+const APP_VERSION = '2026.09.24.girls-v1';
 
 const getCairoDateParts = (date = new Date()) => {
     const parts = new Intl.DateTimeFormat('en-US', {
@@ -219,7 +219,8 @@ const filterToApprovedRoster = (items) => Array.isArray(items)
         return {
             ...student,
             name: correctedName,
-            ...(rosterGrade ? { grade: rosterGrade } : {}),
+            // الصف المتسجل للطالب ليه الأولوية، والقايمة الثابتة بتستخدم بس لو مفيش صف متسجل
+            grade: (student.grade && String(student.grade).trim()) ? student.grade : (rosterGrade || student.grade || ''),
             phone: (student.phone && student.phone.trim()) ? student.phone : (rosterPhone !== undefined ? rosterPhone : ''),
         };
     })
@@ -1135,7 +1136,7 @@ const PointActions = ({ student, addPoints, onActionAfterAdd = null, fromScan = 
 };
 
 
-const defaultAdminsData = [{"id":"admin_mina_rizk","name":"مينا رزق","pin":"1218","isLocked":false,"failedAttempts":0,"isSuperAdmin":true}];
+const defaultAdminsData = [{"id": "admin_mina_rizk", "name": "مينا رزق", "pin": "pbkdf2$100000$ff1024c3314d991d32a611354d2266d7$5f5c8500dcf3122c8439c0eaa4ad351de1a5f35212bd6124a495417cbc824f60", "isLocked": false, "failedAttempts": 0, "isSuperAdmin": true}, {"id": "admin_shady_sameh", "name": "شادي سامح", "pin": "pbkdf2$100000$178dad37ca427baeb8b384d51ed7260a$310884f1703c51a29688404d0917df71f2bc11fdc6ff9d7dc3ff17994f8ef05f", "isLocked": false, "failedAttempts": 0, "isSuperAdmin": false}, {"id": "admin_mina_moawad", "name": "مينا معوض", "pin": "pbkdf2$100000$ab87994fa84a0f6d2b90858daf68d5c5$2e900ebec6803a8bf9eefa3963d488d7d4590033be9748903ebb906300ccd076", "isLocked": false, "failedAttempts": 0, "isSuperAdmin": false}, {"id": "admin_kirollos_raafat", "name": "كيرلس رأفت", "pin": "pbkdf2$100000$003045eefcef1fe01bb80aacb31664f7$883d70acf53589cc09e188e297417c3961fc79b39de68d05dfdfc461f93768fd", "isLocked": false, "failedAttempts": 0, "isSuperAdmin": false}, {"id": "admin_nagy_wiliam", "name": "ناجي وليم", "pin": "pbkdf2$100000$a4d6ddcb9fcb84958af13458d68314f1$4ae85c6a9b34616eb6d18c047a7111789e7f108463f131ddf38d4f8c55985290", "isLocked": false, "failedAttempts": 0, "isSuperAdmin": false}];
 
 const mergeStudentsData = (local, dbItems) => {
     if (!Array.isArray(local) || local.length === 0) return dbItems;
@@ -1203,10 +1204,149 @@ const mergeAdminsData = (local, dbItems) => {
     return Array.from(adminMap.values());
 };
 
+// ============================================================
+// حماية الأرقام السرية للخدام: بتتخزن "مشفّرة" (hash) بدل ما تتخزن زي ما هي،
+// فحتى لو حد قرا قاعدة البيانات أو الكود مش هيعرف الرقم السري الحقيقي.
+// ============================================================
+const PIN_HASH_PREFIX = 'pbkdf2$';
+const PIN_HASH_ITERATIONS = 100000;
+const bytesToHex = (buf) => Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+const hexToBytes = (hex) => new Uint8Array((hex.match(/.{1,2}/g) || []).map(h => parseInt(h, 16)));
+const isHashedPin = (value) => typeof value === 'string' && value.startsWith(PIN_HASH_PREFIX);
+const derivePinHash = async (pin, saltBytes, iterations) => {
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(String(pin)), 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: saltBytes, iterations }, key, 256);
+    return bytesToHex(bits);
+};
+const hashPin = async (pin) => {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const hash = await derivePinHash(pin, salt, PIN_HASH_ITERATIONS);
+    return `${PIN_HASH_PREFIX}${PIN_HASH_ITERATIONS}$${bytesToHex(salt)}$${hash}`;
+};
+const verifyPin = async (pin, stored) => {
+    if (!isHashedPin(stored)) return String(pin) === String(stored); // رقم قديم لسه ماتشفّرش
+    const [, iterStr, saltHex, hashHex] = stored.split('$');
+    const hash = await derivePinHash(pin, hexToBytes(saltHex), Number(iterStr));
+    return hash === hashHex;
+};
+
+// ============================================================
+// حفظ آمن لما أكتر من خادم يسجّل في نفس الوقت
+// بدل ما كل جهاز يكتب قايمة الطلاب كلها فوق بعض (فيضيع شغل جهاز تاني)،
+// كل جهاز بيبعت "اللي هو غيّره بس" ويدمجه على آخر نسخة موجودة فعلًا في قاعدة البيانات.
+// ============================================================
+const sameJSON = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+const mergeHistoryLists = (baseList, localList, remoteList) => {
+    const base = Array.isArray(baseList) ? baseList : [];
+    const local = Array.isArray(localList) ? localList : [];
+    const remote = Array.isArray(remoteList) ? remoteList : [];
+    const baseById = new Map(base.filter(r => r && r.id).map(r => [r.id, r]));
+    const localById = new Map(local.filter(r => r && r.id).map(r => [r.id, r]));
+    const deletedLocally = new Set([...baseById.keys()].filter(id => !localById.has(id)));
+    const remoteIds = new Set(remote.filter(r => r && r.id).map(r => r.id));
+    // سجلات جديدة اتضافت من الجهاز ده ولسه مش موجودة في القاعدة
+    const addedLocally = local.filter(r => r && r.id && !baseById.has(r.id) && !remoteIds.has(r.id));
+    const kept = remote
+        .filter(r => !(r && r.id && deletedLocally.has(r.id)))
+        .map(r => {
+            if (!r || !r.id) return r;
+            const b = baseById.get(r.id);
+            const l = localById.get(r.id);
+            // لو الجهاز ده عدّل السجل نفسه، خد تعديله
+            return (b && l && !sameJSON(b, l)) ? l : r;
+        });
+    return [...addedLocally, ...kept];
+};
+
+const mergeStudentRecord = (base, local, remote) => {
+    const result = { ...remote };
+    const keys = new Set([...Object.keys(base || {}), ...Object.keys(local || {})]);
+    keys.forEach(key => {
+        if (key === 'id') return;
+        const inLocal = local && Object.prototype.hasOwnProperty.call(local, key);
+        if (key === 'points' || key === 'previousYearsPoints') {
+            // النقط بتتدمج كـ"فرق": اللي الجهاز ده زوّده أو نقّصه بيتضاف على الرقم الحالي في القاعدة
+            const delta = Number(local?.[key] || 0) - Number(base?.[key] || 0);
+            if (delta !== 0) result[key] = Number(remote?.[key] || 0) + delta;
+            return;
+        }
+        if (key === 'attendanceHistory') {
+            if (!sameJSON(base?.attendanceHistory, local?.attendanceHistory)) {
+                result.attendanceHistory = mergeHistoryLists(base?.attendanceHistory, local?.attendanceHistory, remote?.attendanceHistory);
+            }
+            return;
+        }
+        if (!inLocal) {
+            if (base && Object.prototype.hasOwnProperty.call(base, key)) delete result[key];
+            return;
+        }
+        if (!sameJSON(local[key], base?.[key])) result[key] = local[key];
+    });
+    return result;
+};
+
+const mergeStudentLists = (baseList, localList, remoteList) => {
+    const base = Array.isArray(baseList) ? baseList : [];
+    const local = Array.isArray(localList) ? localList : [];
+    const remote = Array.isArray(remoteList) ? remoteList : [];
+    const baseById = new Map(base.filter(s => s && s.id).map(s => [s.id, s]));
+    const localById = new Map(local.filter(s => s && s.id).map(s => [s.id, s]));
+    const remoteIds = new Set(remote.filter(s => s && s.id).map(s => s.id));
+
+    const merged = [];
+    remote.forEach(r => {
+        if (!r || !r.id) { merged.push(r); return; }
+        const b = baseById.get(r.id);
+        const l = localById.get(r.id);
+        if (b && !l) return;                 // اتمسح من الجهاز ده
+        if (!b || !l || sameJSON(b, l)) { merged.push(r); return; } // الجهاز ده ماغيّرش فيه حاجة
+        merged.push(mergeStudentRecord(b, l, r));
+    });
+    // طلاب جداد اتضافوا من الجهاز ده
+    local.forEach(l => {
+        if (l && l.id && !baseById.has(l.id) && !remoteIds.has(l.id)) merged.push(l);
+    });
+    return merged;
+};
+
+const STUDENTS_DOC_REF = () => doc(db, 'appData', 'students_v9');
+
+const commitListMerge = (docRef: any, baseList: any[], localList: any[]) => runTransaction(db, async (tx) => {
+    const snap: any = await tx.get(docRef);
+    const snapData: any = snap.exists() ? snap.data() : null;
+    const remoteItems = snapData && Array.isArray(snapData.items) ? snapData.items : null;
+    // لو القاعدة فاضية (أول مرة / بعد نقل)، اكتب النسخة المحلية زي ما هي
+    const finalItems = remoteItems ? mergeStudentLists(baseList, localList, remoteItems) : localList;
+    tx.set(docRef, { items: finalItems }, { merge: true });
+    return finalItems;
+});
+const commitStudentsMerge = (baseList, localList) => commitListMerge(STUDENTS_DOC_REF(), baseList, localList);
+
+// نسخة البنات: بيانات البنات كانت متخزنة في students_v8. أول مرة الموقع الجديد يفتح،
+// بينقلها مرة واحدة لـ students_v9 (والنسخة القديمة بتفضل زي ما هي كنسخة احتياطية).
+// بترجع true لو البيانات بقت موجودة في students_v9، وfalse لو مفيش أي بيانات قديمة خالص.
+const migrateStudentsV8ToV9 = () => runTransaction(db, async (tx) => {
+    const v9Ref = STUDENTS_DOC_REF();
+    const v9Snap: any = await tx.get(v9Ref);
+    if (v9Snap.exists()) return true;
+    const v8Snap: any = await tx.get(doc(db, 'appData', 'students_v8'));
+    const v8Items = v8Snap.exists() && Array.isArray(v8Snap.data()?.items) ? v8Snap.data().items : [];
+    if (v8Items.length === 0) return false;
+    tx.set(v9Ref, { items: v8Items, migratedFromV8At: new Date().toISOString() });
+    return true;
+});
+const ADMINS_DOC_REF = () => doc(db, 'appData', 'admins_v8');
+const commitAdminsMerge = (baseList, localList) => commitListMerge(ADMINS_DOC_REF(), baseList, localList);
+
+const safeParseList = (str) => {
+    try { const v = JSON.parse(str || '[]'); return Array.isArray(v) ? v : []; } catch (e) { return []; }
+};
+
 // --- App Component ---
 const App = () => {
     const [students, setStudents] = useState(() => {
-        const local = appStorage.getItem('church_attendance_students_v8');
+        const local = appStorage.getItem('church_attendance_students_v9');
         if (local) {
             try {
                 const parsed = JSON.parse(local);
@@ -1216,7 +1356,7 @@ const App = () => {
         }
         return [];
     });
-    const [admins, setAdmins] = useState(() => {
+    const [admins, setAdmins] = useState<any[]>(() => {
         const local = appStorage.getItem('church_attendance_admins_v8');
         if (local) {
             try {
@@ -1284,6 +1424,9 @@ const App = () => {
     const [newAdminPin, setNewAdminPin] = useState('');
     const [editingAdminId, setEditingAdminId] = useState(null);
     const [editingAdminPinValue, setEditingAdminPinValue] = useState('');
+    const [ownPinCurrent, setOwnPinCurrent] = useState('');
+    const [ownPinNew, setOwnPinNew] = useState('');
+    const [ownPinConfirm, setOwnPinConfirm] = useState('');
 
     const [selectedDate, setSelectedDate] = useState(() => getCairoDateKey());
     
@@ -1335,6 +1478,57 @@ const App = () => {
         refreshClientForNewVersion();
     }, []);
 
+    // تحديث تلقائي: الموقع بيتأكد بنفسه لو فيه نسخة أحدث اترفعت، ولو لقى، بيمسح الكاش ويعمل ريفريش لوحده.
+    // بيشتغل أول ما الموقع يفتح، وكل ما الموبايل يرجع للتطبيق، وكل 5 دقايق وهو مفتوح.
+    useEffect(() => {
+        const currentScript = document.querySelector('script[type="module"][src]') as HTMLScriptElement | null;
+        const currentSrc = currentScript ? new URL(currentScript.src, window.location.href).pathname : '';
+        if (!currentSrc.includes('/assets/')) return; // وضع التطوير المحلي - مفيش داعي للفحص
+        const basePath = currentSrc.split('/assets/')[0] + '/';
+        let stopped = false;
+
+        const checkForNewDeploy = async () => {
+            if (stopped || document.visibilityState === 'hidden') return;
+            try {
+                const res = await fetch(`${basePath}index.html?check=${Date.now()}`, { cache: 'no-store' });
+                if (!res.ok) return;
+                const html = await res.text();
+                const match = html.match(/<script[^>]*type="module"[^>]*src="([^"]+)"/);
+                if (!match) return;
+                const latestSrc = new URL(match[1], window.location.href).pathname;
+                if (!latestSrc || latestSrc === currentSrc) return;
+                // حماية من الريفريش المتكرر: مرة واحدة بس لكل نسخة جديدة
+                if (sessionStorage.getItem('church_attendance_reloaded_for') === latestSrc) return;
+                sessionStorage.setItem('church_attendance_reloaded_for', latestSrc);
+                try {
+                    if ('caches' in window) {
+                        const names = await caches.keys();
+                        await Promise.all(names.map(name => caches.delete(name)));
+                    }
+                    if ('serviceWorker' in navigator) {
+                        const regs = await navigator.serviceWorker.getRegistrations();
+                        await Promise.all(regs.map(reg => reg.unregister()));
+                    }
+                } catch (e) {
+                    console.warn('Cache cleanup before update failed:', e);
+                }
+                window.location.reload();
+            } catch (e) {
+                // مفيش نت أو مشكلة مؤقتة - هيحاول تاني بعدين
+            }
+        };
+
+        checkForNewDeploy();
+        const interval = setInterval(checkForNewDeploy, 5 * 60 * 1000);
+        const onVisible = () => { if (document.visibilityState === 'visible') checkForNewDeploy(); };
+        document.addEventListener('visibilitychange', onVisible);
+        return () => {
+            stopped = true;
+            clearInterval(interval);
+            document.removeEventListener('visibilitychange', onVisible);
+        };
+    }, []);
+
     useEffect(() => {
         const handleBeforeInstallPrompt = (e: any) => {
             e.preventDefault();
@@ -1384,81 +1578,77 @@ const App = () => {
     };
 
     const isInitialMount = useRef(true);
+    // مفيش أي حفظ بيحصل غير بعد ما البيانات الحقيقية توصل من قاعدة البيانات الأول.
+    // (قبل كده: جهاز جديد أول مرة يفتح الموقع كان بيكتب قايمة الخدام الافتراضية القديمة فوق القايمة الحقيقية،
+    //  فأي رقم سري اتغيّر أو خادم اتضاف كان بيرجع للقديم.)
+    const studentsLoadedFromServer = useRef(false);
+    const adminsLoadedFromServer = useRef(false);
+    const v8MigrationStarted = useRef(false);
 
-    const lastStudentsDB = useRef<string>(appStorage.getItem('church_attendance_students_v8') || '[]');
+    const lastStudentsDB = useRef<string>(appStorage.getItem('church_attendance_students_v9') || '[]');
+    // مراقبة حجم بيانات الطلاب (الحد الأقصى لـFirebase 1 ميجا للمستند الواحد)
+    const [studentsDocBytes, setStudentsDocBytes] = useState(0);
     const lastAdminsDB = useRef<string>(appStorage.getItem('church_attendance_admins_v8') || '[]');
+    // تشفير تلقائي لأي رقم سري قديم لسه متخزن زي ما هو في قاعدة البيانات (بيحصل مرة واحدة)
+    useEffect(() => {
+        if (!adminsLoadedFromServer.current) return;
+        if (!Array.isArray(admins) || !admins.some(a => a && a.pin && !isHashedPin(a.pin))) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const upgraded = await Promise.all(admins.map(async a => (a && a.pin && !isHashedPin(a.pin)) ? { ...a, pin: await hashPin(a.pin) } : a));
+                if (!cancelled) setAdmins(upgraded);
+            } catch (err) {
+                console.error('PIN encryption upgrade failed:', err);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [admins]);
+
     const isRosterMigrationInProgress = useRef(false);
 
     // Initialize Data from Firebase with Offline-Resilient Merging
     useEffect(() => {
-        const unsubStudents = onSnapshot(doc(db, 'appData', 'students_v8'), (docSnap) => {
+        const unsubStudents = onSnapshot(doc(db, 'appData', 'students_v9'), (docSnap) => {
             if (docSnap.exists()) {
+                studentsLoadedFromServer.current = true;
+                try { setStudentsDocBytes(new Blob([JSON.stringify(docSnap.data())]).size); } catch (e) {}
                 const dbItems = docSnap.data()?.items;
                 if (Array.isArray(dbItems)) {
                     const approvedItems = filterToApprovedRoster(dbItems);
-                    const storedMigrationVersion = docSnap.data()?.rosterMigrationVersion || '';
-                    // نسخة البنات: مفيش كشف ثابت، فترحيل كشف الولاد متوقف تمامًا
-                    const needsSeasonReset = false && storedMigrationVersion !== CURRENT_ROSTER_MIGRATION_VERSION;
-
                     if (isRosterMigrationInProgress.current) return;
-
-                    // ملحوظة مهمة: الشرط ده بيتحدد بس من قيمة محفوظة في قاعدة البيانات نفسها (rosterMigrationVersion)
-                    // مش من أي حاجة متخزنة في المتصفح (localStorage) - عشان مسح بيانات الموقع أو تغيير الجهاز
-                    // ميعملش "ريسيت" تاني لنقط الطلاب بالغلط.
-                    if (needsSeasonReset) {
-                        isRosterMigrationInProgress.current = true;
-                        const exactRoster = buildExactCurrentRoster(dbItems);
-                        setDoc(doc(db, 'appData', 'students_pre_roster_2026_backup'), {
-                            items: dbItems,
-                            createdAt: new Date().toISOString(),
-                            migrationVersion: CURRENT_ROSTER_MIGRATION_VERSION,
-                        }, { merge: true })
-                            .then(() => setDoc(doc(db, 'appData', 'students_v8'), {
-                                items: exactRoster,
-                                rosterMigrationVersion: CURRENT_ROSTER_MIGRATION_VERSION,
-                                seasonReset: true,
-                            }, { merge: true }))
-                            .then(() => {
-                                const str = JSON.stringify(exactRoster);
-                                lastStudentsDB.current = str;
-                                appStorage.setItem('church_attendance_students_v8', str);
-                                setStudents(exactRoster);
-                                showToast('✅ تم تحديث كشف الـ84 طالب وتصفير النقاط الحالية وترحيل النقاط القديمة.');
-                            })
-                            .catch(err => {
-                                console.error("Error applying 84-student roster migration:", err);
-                                showToast('❌ حصل خطأ أثناء تحديث كشف الطلاب. البيانات القديمة محفوظة.');
-                            })
-                            .finally(() => {
-                                isRosterMigrationInProgress.current = false;
-                            });
-                        return;
-                    }
+                    // تم إلغاء "تصفير الموسم" التلقائي نهائيًا - اتعمل مرة واحدة خلاص، ومبقاش ينفع يتكرر لوحده تاني.
 
                     const str = JSON.stringify(approvedItems);
                     lastStudentsDB.current = str;
-                    appStorage.setItem('church_attendance_students_v8', str);
+                    appStorage.setItem('church_attendance_students_v9', str);
                     setStudents(approvedItems);
                     if (JSON.stringify(approvedItems) !== JSON.stringify(dbItems)) {
-                        setDoc(doc(db, 'appData', 'students_v8'), { items: approvedItems }, { merge: true })
+                        commitStudentsMerge(dbItems, approvedItems)
                             .catch(err => console.error("Error syncing roster corrections:", err));
                     }
                 } else {
                     setStudents([]);
                 }
             } else {
-                const local = appStorage.getItem('church_attendance_students_v8');
-                if (local) {
-                    try {
-                        const parsed = JSON.parse(local);
-                        const approved = filterToApprovedRoster(parsed);
-                        if (approved.length > 0) {
-                            setStudents(approved);
-                            return;
+                // students_v9 لسه مش موجود: ننقل بيانات students_v8 القديمة مرة واحدة.
+                // لحد ما النقل يخلص مفيش أي حفظ بيحصل، عشان محدش يكتب قايمة فاضية فوق البنات.
+                if (v8MigrationStarted.current) return;
+                v8MigrationStarted.current = true;
+                migrateStudentsV8ToV9()
+                    .then((hasData: boolean) => {
+                        if (!hasData) {
+                            // مشروع جديد خالص ومفيش بيانات قديمة
+                            studentsLoadedFromServer.current = true;
+                            setStudents([]);
                         }
-                    } catch(e) {}
-                }
-                setStudents([]);
+                        // لو النقل نجح، التحديث بيوصل لوحده من قاعدة البيانات
+                    })
+                    .catch(err => {
+                        console.error('Error moving students_v8 to students_v9:', err);
+                        v8MigrationStarted.current = false;
+                        showToast('⚠️ حصلت مشكلة في تحميل بيانات البنات، اتأكد من النت واعمل ريفريش.');
+                    });
             }
         });
 
@@ -1466,6 +1656,7 @@ const App = () => {
             if (docSnap.exists()) {
                 const dbItems = docSnap.data()?.items;
                 if (Array.isArray(dbItems)) {
+                    adminsLoadedFromServer.current = true;
                     const str = JSON.stringify(dbItems);
                     lastAdminsDB.current = str;
                     appStorage.setItem('church_attendance_admins_v8', str);
@@ -1474,6 +1665,9 @@ const App = () => {
                     setAdmins(defaultAdminsData);
                 }
             } else {
+                // المستند مش موجود فعلًا في القاعدة (مشروع جديد): مسموح نكتب القايمة لأول مرة
+                adminsLoadedFromServer.current = true;
+                lastAdminsDB.current = '[]';
                 const local = appStorage.getItem('church_attendance_admins_v8');
                 if (local) {
                     try {
@@ -1505,37 +1699,48 @@ const App = () => {
         }
 
         const currentStr = JSON.stringify(students);
-        if (currentStr !== lastStudentsDB.current) {
-            appStorage.setItem('church_attendance_students_v8', currentStr);
-            setDoc(doc(db, 'appData', 'students_v8'), { items: students }, { merge: true })
-                .catch(err => console.error("Error saving students to Firestore:", err));
+        if (studentsLoadedFromServer.current && currentStr !== lastStudentsDB.current) {
+            const baseList = safeParseList(lastStudentsDB.current);
+            appStorage.setItem('church_attendance_students_v9', currentStr);
             lastStudentsDB.current = currentStr;
+            commitStudentsMerge(baseList, students)
+                .catch(err => {
+                    console.error("Error saving students to Firestore:", err);
+                    showToast('⚠️ فشل حفظ آخر تعديل، اتأكد من النت وجرّب تاني.');
+                });
         }
 
         const currentAdminsStr = JSON.stringify(admins);
-        if (currentAdminsStr !== lastAdminsDB.current) {
+        if (adminsLoadedFromServer.current && currentAdminsStr !== lastAdminsDB.current) {
+            const adminsBase = safeParseList(lastAdminsDB.current);
             appStorage.setItem('church_attendance_admins_v8', currentAdminsStr);
-            setDoc(doc(db, 'appData', 'admins_v8'), { items: admins }, { merge: true })
-                .catch(err => console.error("Error saving admins to Firestore:", err));
             lastAdminsDB.current = currentAdminsStr;
+            commitAdminsMerge(adminsBase, admins)
+                .catch(err => {
+                    console.error("Error saving admins to Firestore:", err);
+                    showToast('⚠️ فشل حفظ تعديل الخدام، اتأكد من النت وجرّب تاني.');
+                });
         }
     }, [students, admins]);
 
         const saveStudentsData = useCallback((newStudents) => {
         const str = JSON.stringify(newStudents);
+        const baseList = safeParseList(lastStudentsDB.current);
         lastStudentsDB.current = str;
-        appStorage.setItem('church_attendance_students_v8', str);
+        appStorage.setItem('church_attendance_students_v9', str);
         setStudents(newStudents);
-        setDoc(doc(db, 'appData', 'students_v8'), { items: newStudents }, { merge: true })
+        commitStudentsMerge(baseList, newStudents)
             .catch(err => console.error("Error saving students to Firestore:", err));
     }, []);
 
     const saveAdminsData = useCallback((newAdmins) => {
+        if (!adminsLoadedFromServer.current) return;
         const str = JSON.stringify(newAdmins);
+        const adminsBase = safeParseList(lastAdminsDB.current);
         lastAdminsDB.current = str;
         appStorage.setItem('church_attendance_admins_v8', str);
         setAdmins(newAdmins);
-        setDoc(doc(db, 'appData', 'admins_v8'), { items: newAdmins }, { merge: true })
+        commitAdminsMerge(adminsBase, newAdmins)
             .catch(err => console.error("Error saving admins to Firestore:", err));
     }, []);
 
@@ -1591,25 +1796,20 @@ const App = () => {
         });
 
         if (migratedStudents) {
+            const migBase = safeParseList(lastStudentsDB.current);
             setStudents(currentStudents);
             const mergedStr = JSON.stringify(currentStudents);
             lastStudentsDB.current = mergedStr;
-            appStorage.setItem('church_attendance_students_v8', mergedStr);
-            setDoc(doc(db, 'appData', 'students_v8'), { items: currentStudents }, { merge: true })
+            appStorage.setItem('church_attendance_students_v9', mergedStr);
+            commitStudentsMerge(migBase, currentStudents)
                 .then(() => {
                     showToast("🎉 تم استيراد ودمج سجلات الطلاب القديمة من جهازك بنجاح!");
                 })
                 .catch(err => console.error("Error saving migrated students:", err));
         }
 
-        if (migratedAdmins) {
-            setAdmins(currentAdmins);
-            const mergedStr = JSON.stringify(currentAdmins);
-            lastAdminsDB.current = mergedStr;
-            appStorage.setItem('church_attendance_admins_v8', mergedStr);
-            setDoc(doc(db, 'appData', 'admins_v8'), { items: currentAdmins }, { merge: true })
-                .catch(err => console.error("Error saving migrated admins:", err));
-        }
+        // بيانات الخدام القديمة المتخزنة على الجهاز من إصدارات قديمة جدًا مابقتش بتتكتب في قاعدة البيانات
+        // (كانت ممكن ترجّع أرقام سرية قديمة). بتتمسح من الجهاز وبس.
     }, []);
 
     // Automatic monthly champion rewards removed in favor of manual servant control
@@ -1790,7 +1990,7 @@ const App = () => {
         }
     }, [students, showToast]);
     
-    const handlePinSubmit = (e) => {
+    const handlePinSubmit = async (e) => {
         e.preventDefault();
         const adminToLogin = admins.find(a => a.id === selectedAdmin.id);
         if (!adminToLogin) {
@@ -1803,7 +2003,13 @@ const App = () => {
             return;
         }
 
-        if (pinInput === adminToLogin.pin) {
+        let pinOk = false;
+        try {
+            pinOk = await verifyPin(pinInput, adminToLogin.pin);
+        } catch (err) {
+            console.error('PIN verification failed:', err);
+        }
+        if (pinOk) {
             setLoggedInAdmin(adminToLogin);
             setAuthModalOpen(false);
             showToast(`أهلاً بك, ${adminToLogin.name}`);
@@ -1973,7 +2179,7 @@ const App = () => {
 
 
     // --- Super Admin Functions ---
-    const handleAddAdmin = () => {
+    const handleAddAdmin = async () => {
         const name = newAdminName.trim();
         const pin = newAdminPin.trim();
 
@@ -1981,8 +2187,8 @@ const App = () => {
             showToast("الرجاء إدخال اسم ورقم سري للخادم الجديد.");
             return;
         }
-        if (!/^\d{4,}$/.test(pin)) {
-            showToast("الرقم السري يجب أن يتكون من 4 أرقام على الأقل.");
+        if (!/^\d{6,}$/.test(pin)) {
+            showToast("الرقم السري يجب أن يتكون من 6 أرقام على الأقل.");
             return;
         }
         if (admins.some(a => a.name.toLowerCase() === name.toLowerCase())) {
@@ -1993,7 +2199,7 @@ const App = () => {
         const newAdmin = {
             id: `admin_${name.replace(/\s+/g, '_').toLowerCase()}_${generateId()}`,
             name: name,
-            pin: pin,
+            pin: await hashPin(pin),
             isLocked: false,
             failedAttempts: 0,
             isSuperAdmin: false
@@ -2031,12 +2237,37 @@ const App = () => {
         setEditingAdminPinValue('');
     };
 
-    const handleSaveAdminPin = (adminId) => {
-        if (!/^\d{4,}$/.test(editingAdminPinValue)) {
-            showToast("الرقم السري يجب أن يتكون من 4 أرقام على الأقل.");
+    // تغيير الرقم السري للسوبر أدمن نفسه (لازم يكتب رقمه الحالي الأول للتأكيد)
+    const handleChangeOwnPin = async () => {
+        if (!loggedInAdmin) return;
+        const me = admins.find(a => a.id === loggedInAdmin.id);
+        if (!me) return;
+        if (!(await verifyPin(ownPinCurrent, me.pin))) {
+            showToast('الرقم السري الحالي غلط.');
             return;
         }
-        setAdmins(prev => prev.map(a => a.id === adminId ? { ...a, pin: editingAdminPinValue } : a));
+        if (!/^\d{6,}$/.test(ownPinNew)) {
+            showToast('الرقم السري الجديد يجب أن يتكون من 6 أرقام على الأقل.');
+            return;
+        }
+        if (ownPinNew !== ownPinConfirm) {
+            showToast('الرقمين الجداد مش متطابقين.');
+            return;
+        }
+        const hashed = await hashPin(ownPinNew);
+        setAdmins(prev => prev.map(a => a.id === me.id ? { ...a, pin: hashed, failedAttempts: 0 } : a));
+        setLoggedInAdmin(prev => prev ? { ...prev, pin: hashed } : prev);
+        setOwnPinCurrent(''); setOwnPinNew(''); setOwnPinConfirm('');
+        showToast('✅ تم تغيير رقمك السري بنجاح.');
+    };
+
+    const handleSaveAdminPin = async (adminId) => {
+        if (!/^\d{6,}$/.test(editingAdminPinValue)) {
+            showToast("الرقم السري يجب أن يتكون من 6 أرقام على الأقل.");
+            return;
+        }
+        const hashed = await hashPin(editingAdminPinValue);
+        setAdmins(prev => prev.map(a => a.id === adminId ? { ...a, pin: hashed, failedAttempts: 0 } : a));
         showToast(`تم تغيير الرقم السري بنجاح.`);
         setEditingAdminId(null);
         setEditingAdminPinValue('');
@@ -2063,8 +2294,16 @@ const App = () => {
     };
 
     const handleImportData = (e) => {
+        const input = e.currentTarget || e.target;
         const file = e.target.files[0];
         if (!file) return;
+        const confirmed = window.confirm(
+            `⚠️ تحذير مهم\n\nهتستبدل كل بيانات الطلاب والنقط الحالية بمحتوى الملف:\n"${file.name}"\n\nأي نقط أو حضور اتسجل بعد تاريخ الملف ده هيضيع.\n\nمتأكد إنك عايز تكمل؟`
+        );
+        if (!confirmed) {
+            if (input) input.value = '';
+            return;
+        }
 
         const reader = new FileReader();
         reader.onload = (event) => {
@@ -2103,7 +2342,7 @@ const App = () => {
                     typeof admin.name === 'string' &&
                     admin.name.trim().length > 0 &&
                     typeof admin.pin === 'string' &&
-                    /^\d{4,}$/.test(admin.pin);
+                    (/^\d{4,}$/.test(admin.pin) || /^pbkdf2\$\d+\$[0-9a-f]+\$[0-9a-f]+$/.test(admin.pin));
 
                 if (data.students !== undefined) {
                     if (!Array.isArray(data.students) || !data.students.every(isValidStudent)) {
@@ -2689,7 +2928,7 @@ const App = () => {
             date: dateToRecord,
             points: diff,
             type: 'manual',
-            typeName: 'تعديل نقاط (مينا)',
+            typeName: 'تعديل نقاط (الأدمن)',
             description: `تعديل رصيد النقاط والفلوس بواسطة الخادم ${loggedInAdmin.name}`,
             recordedBy: loggedInAdmin.name,
         } : null;
@@ -2757,8 +2996,8 @@ const App = () => {
                                         ? 'bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/50'
                                         : 'bg-indigo-800 hover:bg-indigo-700 text-white'
                                 }`}
-                                title="تنبيهات واستحقاقات الأوسمة والمكافآت (خاص بمينا)"
-                                aria-label="تنبيهات الأوسمة (مينا)"
+                                title="تنبيهات واستحقاقات الأوسمة والمكافآت (خاص بالأدمن)"
+                                aria-label="تنبيهات الأوسمة"
                             >
                                 <BellIcon className="w-6 h-6" />
                                 {pendingBadgesCount > 0 && (
@@ -2992,7 +3231,7 @@ const App = () => {
                                                                 </div>
                                                                 {isMinaAdmin && (
                                                                     <div className="flex flex-col gap-1">
-                                                                        <label className="text-xs text-amber-300 font-bold">نقاط السنين السابقة (مينا فقط):</label>
+                                                                        <label className="text-xs text-amber-300 font-bold">نقاط السنين السابقة (الأدمن فقط):</label>
                                                                         <input
                                                                             type="number"
                                                                             min="0"
@@ -3348,10 +3587,10 @@ const App = () => {
                                                                        openPointsEditModal(student);
                                                                    }}
                                                                    className="text-[11px] font-bold text-amber-300 hover:text-amber-100 bg-amber-500/20 hover:bg-amber-500/40 border border-amber-500/40 px-2 py-0.5 rounded-md flex items-center justify-center gap-1 transition-all shadow-sm"
-                                                                   title="تعديل نقاط الشاب والفلوس (مينا فقط)"
+                                                                   title="تعديل نقاط الشابة والفلوس (الأدمن فقط)"
                                                                >
                                                                    <PencilIcon className="w-3 h-3" />
-                                                                   <span>تعديل (مينا)</span>
+                                                                   <span>تعديل (الأدمن)</span>
                                                                </button>
                                                            )}
                                                        </div>
@@ -3424,10 +3663,10 @@ const App = () => {
                                                                        openPointsEditModal(student);
                                                                    }}
                                                                    className="text-[11px] font-bold text-amber-300 hover:text-amber-100 bg-amber-500/20 hover:bg-amber-500/40 border border-amber-500/40 px-2 py-0.5 rounded-md flex items-center justify-center gap-1 transition-all shadow-sm"
-                                                                   title="تعديل نقاط الشاب والفلوس (مينا فقط)"
+                                                                   title="تعديل نقاط الشابة والفلوس (الأدمن فقط)"
                                                                >
                                                                    <PencilIcon className="w-3 h-3" />
-                                                                   <span>تعديل (مينا)</span>
+                                                                   <span>تعديل (الأدمن)</span>
                                                                </button>
                                                            )}
                                                        </div>
@@ -3500,10 +3739,10 @@ const App = () => {
                                                                        openPointsEditModal(student);
                                                                    }}
                                                                    className="text-[11px] font-bold text-amber-300 hover:text-amber-100 bg-amber-500/20 hover:bg-amber-500/40 border border-amber-500/40 px-2 py-0.5 rounded-md flex items-center justify-center gap-1 transition-all shadow-sm"
-                                                                   title="تعديل نقاط الشاب والفلوس (مينا فقط)"
+                                                                   title="تعديل نقاط الشابة والفلوس (الأدمن فقط)"
                                                                >
                                                                    <PencilIcon className="w-3 h-3" />
-                                                                   <span>تعديل (مينا)</span>
+                                                                   <span>تعديل (الأدمن)</span>
                                                                </button>
                                                            )}
                                                        </div>
@@ -3561,10 +3800,10 @@ const App = () => {
                                                                   openPointsEditModal(student);
                                                               }}
                                                               className="mt-1.5 text-[11px] font-bold text-amber-300 hover:text-amber-100 bg-amber-500/20 hover:bg-amber-500/40 border border-amber-500/40 px-2 py-0.5 rounded-md flex items-center justify-center gap-1 transition-all mr-auto shadow-sm"
-                                                              title="تعديل نقاط الشاب والفلوس (مينا فقط)"
+                                                              title="تعديل نقاط الشابة والفلوس (الأدمن فقط)"
                                                           >
                                                               <PencilIcon className="w-3 h-3" />
-                                                              <span>تعديل (مينا)</span>
+                                                              <span>تعديل (الأدمن)</span>
                                                           </button>
                                                       )}
                                              </div>
@@ -4226,6 +4465,20 @@ const App = () => {
                     </div>
                 </div>
 
+                <div className="mt-6 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg space-y-2">
+                    <h3 className="text-base font-bold text-amber-400">🔑 تغيير رقمي السري</h3>
+                    <input type="password" inputMode="numeric" value={ownPinCurrent} onChange={e => setOwnPinCurrent(e.target.value)} placeholder="رقمك السري الحالي"
+                        className="w-full bg-indigo-700 text-white placeholder-indigo-300 border border-indigo-600 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-500" />
+                    <input type="password" inputMode="numeric" value={ownPinNew} onChange={e => setOwnPinNew(e.target.value)} placeholder="الرقم الجديد (6 أرقام على الأقل)"
+                        className="w-full bg-indigo-700 text-white placeholder-indigo-300 border border-indigo-600 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-500" />
+                    <input type="password" inputMode="numeric" value={ownPinConfirm} onChange={e => setOwnPinConfirm(e.target.value)} placeholder="اكتب الرقم الجديد تاني للتأكيد"
+                        className="w-full bg-indigo-700 text-white placeholder-indigo-300 border border-indigo-600 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-500" />
+                    <button onClick={handleChangeOwnPin} disabled={!ownPinCurrent || !ownPinNew || !ownPinConfirm}
+                        className="w-full bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-indigo-950 font-bold py-2 rounded-lg transition-colors">
+                        حفظ رقمي الجديد
+                    </button>
+                </div>
+
                 <h3 className="text-lg font-semibold mt-6 mb-3 text-indigo-200">قائمة الخدام الحالية</h3>
                 <div className="space-y-3">
                     {admins.filter(a => !a.isSuperAdmin).map(admin => (
@@ -4631,7 +4884,7 @@ const App = () => {
             <Modal
                 isOpen={!!studentForPointsEdit && isMinaAdmin}
                 onClose={() => setStudentForPointsEdit(null)}
-                title="التحكم بالنواحي والفلوس (خاص بالخادم مينا) ⚖️"
+                title="التحكم بالنواحي والفلوس (خاص بالأدمن) ⚖️"
             >
                 {studentForPointsEdit && (
                     <div className="space-y-5 text-right font-sans" dir="rtl">
@@ -4652,6 +4905,12 @@ const App = () => {
                 )}
             </Modal>
 
+            {isSuperAdmin && studentsDocBytes > 700000 && (
+                <div style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 60, background: '#b91c1c', color: 'white', textAlign: 'center', fontSize: 13, fontWeight: 700, padding: '8px 12px' }}>
+                    ⚠️ بيانات الطلاب وصلت {Math.round(studentsDocBytes / 10485.76)}% من الحد الأقصى. حمّل نسخة احتياطية وكلّم المطوّر قريب عشان نوسّع المساحة.
+                </div>
+            )}
+            <div style={{ position: 'fixed', bottom: 4, right: 8, fontSize: 10, opacity: 0.45, color: '#ecc9e4', zIndex: 1, pointerEvents: 'none', direction: 'ltr' }}>v{APP_VERSION}</div>
         </div>
     );
 };
