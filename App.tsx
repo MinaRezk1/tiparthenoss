@@ -20,7 +20,7 @@ const appStorage = {
 const generateId = () => `_${Math.random().toString(36).substring(2, 11)}`;
 
 const CAIRO_TIMEZONE = 'Africa/Cairo';
-const APP_VERSION = '2026.09.24.girls-v1';
+const APP_VERSION = '2026.09.24.girls-v2';
 
 const getCairoDateParts = (date = new Date()) => {
     const parts = new Intl.DateTimeFormat('en-US', {
@@ -3144,29 +3144,7 @@ const App = () => {
                                             <div className='flex items-center gap-4 flex-wrap'>
                                                 <div className="flex flex-col items-center justify-center min-w-[96px] leading-tight">
                                                     <div className="text-amber-400 font-bold text-xl">{student.points || 0}</div>
-                                                    <div className="text-[9px] text-sky-300/90 font-bold text-center mt-1 whitespace-nowrap">
-                                                        نقاط السنين السابقة: {student.previousYearsPoints || 0}
-                                                    </div>
-                                                    {isMinaAdmin && (
-                                                        <button
-                                                            type="button"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                handleEditStudent(student);
-                                                            }}
-                                                            className="mt-1 text-[9px] text-amber-300 hover:text-amber-200 font-black underline underline-offset-2"
-                                                            title="تعديل نقاط السنين السابقة"
-                                                        >
-                                                            ✏️ تعديل السنين السابقة
-                                                        </button>
-                                                    )}
-                                                    <div className="mt-1.5 px-2.5 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-400/30 text-center whitespace-nowrap">
-                                                        <div className="text-[9px] text-emerald-200 font-black leading-none">TOTAL POINTS</div>
-                                                        <div className="text-lg text-emerald-300 font-black leading-tight">
-                                                            {getStudentTotalPoints(student)}
-                                                        </div>
-                                                        <div className="text-[8px] text-emerald-200/70 font-semibold leading-none">السابق + الحالي</div>
-                                                    </div>
+                                                    {/* نسخة البنات: دي أول سنة، فمفيش نقاط سنين سابقة ولا TOTAL POINTS */}
                                                 </div>
                                                 <span className="text-lg font-semibold flex items-center gap-2 flex-wrap">
                                                     <span>{student.name}</span>
@@ -3229,19 +3207,6 @@ const App = () => {
                                                                         <option value="تالتة ثانوي">تالتة ثانوي</option>
                                                                      </select>
                                                                 </div>
-                                                                {isMinaAdmin && (
-                                                                    <div className="flex flex-col gap-1">
-                                                                        <label className="text-xs text-amber-300 font-bold">نقاط السنين السابقة (الأدمن فقط):</label>
-                                                                        <input
-                                                                            type="number"
-                                                                            min="0"
-                                                                            step="1"
-                                                                            value={editingStudent.previousYearsPoints ?? 0}
-                                                                            onChange={(e) => setEditingStudent({...editingStudent, previousYearsPoints: e.target.value})}
-                                                                            className="bg-indigo-700 text-white border border-amber-500/50 rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-amber-500 w-full"
-                                                                        />
-                                                                    </div>
-                                                                )}
                                                                 <div className="flex justify-end gap-2 mt-2">
                                                                     <button onClick={() => handleSaveStudentEdit(student.id)} className="text-green-400 hover:text-green-300 p-1"><CheckIcon className="w-5 h-5"/></button>
                                                                     <button onClick={handleCancelEdit} className="text-red-400 hover:text-red-300 p-1"><XIcon className="w-5 h-5"/></button>
