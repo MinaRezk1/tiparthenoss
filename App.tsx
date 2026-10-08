@@ -21,7 +21,7 @@ const appStorage = {
 const generateId = () => `_${Math.random().toString(36).substring(2, 11)}`;
 
 const CAIRO_TIMEZONE = 'Africa/Cairo';
-const APP_VERSION = '2026.10.08.girls-v4';
+const APP_VERSION = '2026.10.08.girls-v5';
 
 const getCairoDateParts = (date = new Date()) => {
     const parts = new Intl.DateTimeFormat('en-US', {
@@ -97,6 +97,41 @@ const getArabicMonthNameFromPrefix = (prefix) => {
     if (!year || !month) return '';
     const months = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيه', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
     return `${months[month - 1]} ${year}`;
+};
+
+// نسخة البنات: في أول جمعة، القداس وحضور الاجتماع بيتسجلوا كسجلين منفصلين (عشان الحضور والأوسمة)،
+// بس في "تفاصيل النقاط" بتاعة البنت بيظهروا سطر واحد: "قداس شهري + حضور مبكر للاجتماع" (25 نقطة).
+const mergeMassMeetingRecords = (history) => {
+    const list = Array.isArray(history) ? history : [];
+    const used = new Set<any>();
+    const out: any[] = [];
+    list.forEach((r: any) => {
+        if (used.has(r)) return;
+        const isMeeting = (x: any) => x && (x.type === 'early' || x.type === 'late');
+        let mass: any = null, meeting: any = null;
+        if (r && r.type === 'monthlyMass') {
+            mass = r;
+            meeting = list.find(x => x !== r && !used.has(x) && isMeeting(x) && x.date === r.date) || null;
+        } else if (isMeeting(r)) {
+            meeting = r;
+            mass = list.find(x => x !== r && !used.has(x) && x.type === 'monthlyMass' && x.date === r.date) || null;
+        }
+        if (mass && meeting) {
+            used.add(mass); used.add(meeting);
+            out.push({
+                ...mass,
+                id: `merged_${mass.id}_${meeting.id}`,
+                typeName: `قداس شهري + ${meeting.type === 'early' ? 'حضور مبكر للاجتماع' : 'حضور متأخر للاجتماع'}`,
+                points: Number(mass.points || 0) + Number(meeting.points || 0),
+                mergedIds: [mass.id, meeting.id],
+                mergedRecords: [mass, meeting],
+            });
+            return;
+        }
+        used.add(r);
+        out.push(r);
+    });
+    return out;
 };
 
 const isFridayDateKey = (dateKey) => {
@@ -775,7 +810,7 @@ const PointActions = ({ student, addPoints, onActionAfterAdd = null, fromScan = 
     };
 
     const quick = [
-        { type: 'monthlyMass', pts: 25, label: 'قداس شهري', emoji: '⛪', ok: rules.canAddMass, tone: 'bg-purple-600' },
+        { type: 'monthlyMass', pts: 15, label: 'قداس شهري', emoji: '⛪', ok: rules.canAddMass, tone: 'bg-purple-600' },
         { type: 'early', pts: 10, label: 'حضور مبكر', emoji: '⏰', ok: rules.canAddEarly, tone: 'bg-green-600' },
         { type: 'late', pts: 5, label: 'حضور متأخر', emoji: '🚶', ok: rules.canAddLate, tone: 'bg-yellow-600' },
         { type: 'confession', pts: 15, label: 'اعتراف', emoji: '🙏', ok: rules.canAddConfession, tone: 'bg-rose-600' },
@@ -2045,7 +2080,8 @@ const App = () => {
 
         const updatedStudents = students.map(student => {
             if (student.id === studentId) {
-                const newHistory = (student.attendanceHistory || []).filter(h => h.id !== record.id);
+                const idsToRemove = Array.isArray(record.mergedIds) ? record.mergedIds : [record.id];
+                const newHistory = (student.attendanceHistory || []).filter(h => !idsToRemove.includes(h.id));
                 const newPoints = (student.points || 0) - record.points;
                 return { ...student, points: newPoints, attendanceHistory: newHistory };
             }
@@ -3698,10 +3734,12 @@ const App = () => {
                                                     {visibleHistoryStudentId === student.id && (
                                                         <ul className="space-y-2 max-h-48 overflow-y-auto pr-2 mt-3">
                                                             {student.attendanceHistory && student.attendanceHistory.length > 0 ? 
-                                                                [...student.attendanceHistory]
+                                                                mergeMassMeetingRecords(student.attendanceHistory)
                                                                 .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()) // Descending: Newest first
                                                                 .map((record, index) => {
-                                                                 const canDelete = isSuperAdmin || (loggedInAdmin && record.recordedBy === loggedInAdmin.name);
+                                                                 const canDelete = isSuperAdmin || (loggedInAdmin && (record.mergedRecords
+                                                                     ? record.mergedRecords.every(r => r.recordedBy === loggedInAdmin.name)
+                                                                     : record.recordedBy === loggedInAdmin.name));
                                                                  return (
                                                                     <li key={record.id || index} className="bg-indigo-800/50 p-2 rounded-md text-sm">
                                                                         <div className="flex justify-between items-center">
