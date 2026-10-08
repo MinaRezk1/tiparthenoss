@@ -21,7 +21,7 @@ const appStorage = {
 const generateId = () => `_${Math.random().toString(36).substring(2, 11)}`;
 
 const CAIRO_TIMEZONE = 'Africa/Cairo';
-const APP_VERSION = '2026.10.08.girls-v3';
+const APP_VERSION = '2026.10.08.girls-v4';
 
 const getCairoDateParts = (date = new Date()) => {
     const parts = new Intl.DateTimeFormat('en-US', {
@@ -54,7 +54,7 @@ const getCairoMonthPrefix = (date = new Date()) => getCairoDateKey(date).slice(0
 
 const isEarlyBadgeEligibleAt = (date = new Date()) => {
     const parts = getCairoDateParts(date);
-    return parts.weekday === 'Fri' && !isFirstFridayDateKey(getCairoDateKey(date)) &&
+    return parts.weekday === 'Fri' &&
         parts.hour === 15 && parts.minute >= 0 && parts.minute < 15;
 };
 
@@ -107,7 +107,8 @@ const isFridayDateKey = (dateKey) => {
 const isFirstFridayDateKey = (dateKey) => isFridayDateKey(dateKey) && Number(dateKey.slice(8, 10)) <= 7;
 
 // إضافة النقط مسموحة يوم الجمعة بس، طول اليوم (من غير مواعيد).
-// أول جمعة في الشهر: القداس الشهري بدل الاجتماع.
+// نسخة البنات: أول جمعة في الشهر فيها القداس الشهري والاجتماع بعده،
+// فبيتسجلوا منفصلين (اللي حضرت الاجتماع بس تاخد حضور الاجتماع بس).
 const getAttendanceWindow = (date = new Date()) => {
     const parts = getCairoDateParts(date);
     const dateKey = getCairoDateKey(date);
@@ -137,7 +138,7 @@ const getAttendanceWindow = (date = new Date()) => {
 
 const getMeetingTimeMessage = () => {
     const dateKey = getCairoDateKey();
-    if (isFirstFridayDateKey(dateKey)) return 'القداس الشهري: متاح طول اليوم';
+    if (isFirstFridayDateKey(dateKey)) return 'أول جمعة: القداس الشهري + الاجتماع (متاح طول اليوم)';
     if (isFridayDateKey(dateKey)) return 'الاجتماع: إضافة النقط متاحة طول اليوم';
     return 'إضافة النقط يوم الجمعة فقط';
 };
@@ -701,7 +702,7 @@ const getFirstFridayOfFollowingMonth = (baseDate = new Date()) => {
 };
 
 const PointActions = ({ student, addPoints, onActionAfterAdd = null, fromScan = false, selectedDate, isSuperAdmin = false }) => {
-    // نوع النقط المتغيرة اللي الخادم بيضيفها (مشاركة / Games / ROOTS / خصم)
+    // نوع النقط المتغيرة اللي الخادم بيضيفها (مشاركة / Games / خصم)
     const [mode, setMode] = useState('participation');
     const [amount, setAmount] = useState('1');
     const [participationDescription, setParticipationDescription] = useState('');
@@ -723,7 +724,6 @@ const PointActions = ({ student, addPoints, onActionAfterAdd = null, fromScan = 
         const hasReceivedPointsToday = (type) => history.some(h => h.date === targetDate && h.type === type);
         const hasReceivedAttendanceToday = hasReceivedPointsToday('early') || hasReceivedPointsToday('late');
         const hasReceivedGamesStationToday = hasReceivedPointsToday('gamesStation');
-        const hasReceivedRootsToday = hasReceivedPointsToday('roots');
         const hasReceivedMassThisMonth = history.some(h =>
             h.date && h.date.startsWith(currentMonthStr) && h.type === 'monthlyMass'
         );
@@ -732,15 +732,14 @@ const PointActions = ({ student, addPoints, onActionAfterAdd = null, fromScan = 
             h.date && h.date.startsWith(currentMonthStr) && h.type === 'confession'
         );
         const canAddConfession = !hasReceivedConfessionThisMonth;
-        const regularMeetingTimeAllowed = meetingTimeAllowed && (!isHistoricalEdit ? currentWindow?.kind !== 'monthlyMass' : true);
+        const regularMeetingTimeAllowed = meetingTimeAllowed;
 
         return {
             canAddMass: targetIsFirstFriday && !hasReceivedMassThisMonth && meetingTimeAllowed,
-            canAddEarly: targetIsFriday && !targetIsFirstFriday && !hasReceivedAttendanceToday && meetingTimeAllowed,
-            canAddLate: targetIsFriday && !targetIsFirstFriday && !hasReceivedAttendanceToday && meetingTimeAllowed,
+            canAddEarly: targetIsFriday && !hasReceivedAttendanceToday && meetingTimeAllowed,
+            canAddLate: targetIsFriday && !hasReceivedAttendanceToday && meetingTimeAllowed,
             canAddConfession: canAddConfession && meetingTimeAllowed,
             canAddGamesStation: regularMeetingTimeAllowed && !hasReceivedGamesStationToday,
-            canAddRoots: regularMeetingTimeAllowed && !hasReceivedRootsToday,
             canAddParticipation: regularMeetingTimeAllowed,
             windowMessage: isHistoricalEdit ? null : (currentWindow?.message || null),
             meetingTimeLabel: getMeetingTimeMessage(),
@@ -759,7 +758,6 @@ const PointActions = ({ student, addPoints, onActionAfterAdd = null, fromScan = 
     const MODES = {
         participation: { label: 'مشاركة', emoji: '✨', min: -10, max: 50, def: 1, enabled: rules.canAddParticipation, tone: 'from-amber-500 to-orange-600', ring: 'border-amber-400 text-amber-200 bg-amber-500/20' },
         gamesStation: { label: 'Games', emoji: '🎮', min: -50, max: 100, def: 1, enabled: rules.canAddGamesStation, tone: 'from-fuchsia-500 to-pink-600', ring: 'border-fuchsia-400 text-fuchsia-200 bg-fuchsia-500/20' },
-        roots: { label: 'ROOTS', emoji: '🌱', min: -50, max: 100, def: 1, enabled: rules.canAddRoots, tone: 'from-emerald-500 to-teal-600', ring: 'border-emerald-400 text-emerald-200 bg-emerald-500/20' },
         exchange: { label: 'خصم', emoji: '🔄', min: 1, max: 3000, def: 5, enabled: true, tone: 'from-rose-600 to-red-700', ring: 'border-rose-400 text-rose-200 bg-rose-500/20' },
     };
     const cfg = MODES[mode];
@@ -1733,17 +1731,10 @@ const App = () => {
                 showToast(windowState.message);
                 return;
             }
-            const allowed = type === 'monthlyMass'
-                ? windowState.kind === 'monthlyMass'
-                : (type === 'early' || type === 'late')
-                    ? windowState.kind === 'meeting'
-                    : (type === 'participation' || type === 'gamesStation' || type === 'roots')
-                        ? windowState.kind !== 'monthlyMass'
-                        : true;
+            // أول جمعة: القداس + الاجتماع مع بعض، وباقي الجمع: الاجتماع بس
+            const allowed = type === 'monthlyMass' ? windowState.kind === 'monthlyMass' : type !== 'roots';
             if (!allowed) {
-                showToast(windowState.kind === 'monthlyMass'
-                    ? '⚠️ النهارده أول جمعة في الشهر (القداس الشهري)، مفيش حضور اجتماع.'
-                    : '⚠️ القداس الشهري بيتسجل في أول جمعة من الشهر بس.');
+                showToast('⚠️ القداس الشهري بيتسجل في أول جمعة من الشهر بس.');
                 return;
             }
         }
@@ -2815,7 +2806,7 @@ const App = () => {
         const d = formatCairoDateKeyAr(sum.m.date, { weekday: 'long', day: 'numeric', month: 'long' });
         const diff = sum.prevCount === null ? '' : sum.present.length - sum.prevCount;
         const lines = [
-            `📋 ملخص ${sum.isMass ? 'القداس الشهري' : 'اجتماع'} ${d}${scopeLabel ? ` — ${scopeLabel}` : ''}`,
+            `📋 ملخص ${sum.isMass ? 'القداس والاجتماع' : 'اجتماع'} ${d}${scopeLabel ? ` — ${scopeLabel}` : ''}`,
             `اجتماع تي بارثينوس - شابات ثانوي`,
             ``,
             `👥 الحضور: ${sum.present.length}${diff === '' ? '' : diff > 0 ? ` (⬆️ ${diff} عن اللي قبله)` : diff < 0 ? ` (⬇️ ${Math.abs(Number(diff))} عن اللي قبله)` : ' (زي اللي قبله)'}`,
@@ -3061,9 +3052,9 @@ const App = () => {
         const presentRows = [['م', 'الاسم', 'المرحلة الدراسية', 'رقم الموبايل', 'نوع الحضور', 'نقاط اليوم', 'التفاصيل']];
         attended.forEach((s, idx) => {
             const recs = (s.attendanceHistory || []).filter(h => h.date === dateKey);
-            const att = recs.find(h => ATTENDANCE_TYPES.includes(h.type));
+            const attLabel = recs.filter(h => ATTENDANCE_TYPES.includes(h.type)).map(recordLabel).join(' + ');
             presentRows.push([
-                idx + 1, s.name || '', s.grade || '', s.phone || '', att ? recordLabel(att) : '',
+                idx + 1, s.name || '', s.grade || '', s.phone || '', attLabel,
                 recs.filter(isActivityRecord).reduce((n, h) => n + Number(h.points || 0), 0),
                 recs.map(h => `${recordLabel(h)} (${Number(h.points) > 0 ? '+' : ''}${Number(h.points || 0)})${h.description ? ' - ' + h.description : ''}`).join(' | '),
             ]);
