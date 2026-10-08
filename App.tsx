@@ -1,9 +1,10 @@
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import './index.css';
 import { db } from './firebase';
 import './GiftsShop';
-import { doc, onSnapshot, setDoc, runTransaction } from 'firebase/firestore';
+import { doc, onSnapshot, setDoc, runTransaction, deleteField } from 'firebase/firestore';
 
 
 
@@ -20,7 +21,7 @@ const appStorage = {
 const generateId = () => `_${Math.random().toString(36).substring(2, 11)}`;
 
 const CAIRO_TIMEZONE = 'Africa/Cairo';
-const APP_VERSION = '2026.09.24.girls-v2';
+const APP_VERSION = '2026.10.08.girls-v3';
 
 const getCairoDateParts = (date = new Date()) => {
     const parts = new Intl.DateTimeFormat('en-US', {
@@ -57,13 +58,33 @@ const isEarlyBadgeEligibleAt = (date = new Date()) => {
         parts.hour === 15 && parts.minute >= 0 && parts.minute < 15;
 };
 
-const isEarlyBadgeRecord = (record) => {
-    if (!record || record.type !== 'early') return false;
-    if (record.meta === 'early_badge_eligible') return true;
-    if (!record.recordedAt) return false;
-    const recordedAt = new Date(record.recordedAt);
-    return !Number.isNaN(recordedAt.getTime()) && isEarlyBadgeEligibleAt(recordedAt);
+// سجلات "مكافآت" (ترتيب الشهر، الأوسمة...) وسجلات "متجر الهدايا" مش نشاط الولد نفسه،
+// فمابتدخلش في ترتيب الشهر ولا في حساب أوسمة المشاركة ولا في إحصائيات الاجتماع.
+const isRewardRecord = (h) => Boolean(h) && (
+    (typeof h.typeName === 'string' && h.typeName.startsWith('مكافأة')) ||
+    (typeof h.meta === 'string' && /^(leaderboard_reward_|badge_reward_|manual_badge_bonus_|monthly_all_)/.test(h.meta))
+);
+const isGiftRecord = (h) => Boolean(h) && (h.type === 'giftPurchase' || h.type === 'giftRefund');
+const isActivityRecord = (h) => !isRewardRecord(h) && !isGiftRecord(h);
+
+// رقم الموبايل المصري بصيغة واتساب (20 + الرقم من غير الصفر)
+const toWhatsAppNumber = (phone) => {
+    const d = String(phone || '').replace(/\D/g, '');
+    if (/^01[0125]\d{8}$/.test(d)) return '2' + d;
+    if (/^1[0125]\d{8}$/.test(d)) return '20' + d;
+    if (/^201[0125]\d{8}$/.test(d)) return d;
+    return '';
 };
+
+// النقط اللي الولد "كسبها" السنة دي (حضور ومشاركة ومكافآت...) من غير ما مشتريات الهدايا تنقّصها.
+// بتستخدم في لوحة الصدارة ووسام الألف نقطة، عشان الولد مايتأخرش في الترتيب لو صرف نقطه.
+const getEarnedPointsFromHistory = (history, balancePoints = 0) => {
+    const earned = (history || []).filter(h => !isGiftRecord(h)).reduce((n, h) => n + Number(h.points || 0), 0);
+    return Math.max(Number(balancePoints) || 0, earned);
+};
+
+// أي "حضور مبكر" بيتحسب في وسام الحضور المبكر، في أي وقت اتسجل فيه يوم الجمعة
+const isEarlyBadgeRecord = (record) => Boolean(record && record.type === 'early');
 
 const getCairoMonthPrefixOffset = (offset, date = new Date()) => {
     const parts = getCairoDateParts(date);
@@ -85,39 +106,40 @@ const isFridayDateKey = (dateKey) => {
 
 const isFirstFridayDateKey = (dateKey) => isFridayDateKey(dateKey) && Number(dateKey.slice(8, 10)) <= 7;
 
+// إضافة النقط مسموحة يوم الجمعة بس، طول اليوم (من غير مواعيد).
+// أول جمعة في الشهر: القداس الشهري بدل الاجتماع.
 const getAttendanceWindow = (date = new Date()) => {
     const parts = getCairoDateParts(date);
     const dateKey = getCairoDateKey(date);
-    const firstFriday = isFirstFridayDateKey(dateKey);
 
-    if (firstFriday) {
+    if (isFirstFridayDateKey(dateKey)) {
         return {
             kind: 'monthlyMass',
-            isWithinAllowedTime: parts.hour >= 8 && parts.hour < 12,
-            message: '⚠️ الوقت الحالي ليس ضمن وقت القداس الشهري (8 ص–12 م)',
+            isWithinAllowedTime: true,
+            message: '',
         };
     }
 
     if (parts.weekday === 'Fri') {
         return {
-            kind: parts.hour < 16 ? 'early' : 'late',
-            isWithinAllowedTime: parts.hour >= 15 && parts.hour < 17,
-            message: '⚠️ الحضور المبكر (+10) متاح من 3:00 إلى 3:15 م فقط، والحضور المتأخر متاح بعد ذلك حتى 5 م.',
+            kind: 'meeting',
+            isWithinAllowedTime: true,
+            message: '',
         };
     }
 
     return {
         kind: 'none',
         isWithinAllowedTime: false,
-        message: '⚠️ الحضور متاح يوم الجمعة فقط.',
+        message: '⚠️ إضافة النقط متاحة يوم الجمعة بس.',
     };
 };
 
 const getMeetingTimeMessage = () => {
     const dateKey = getCairoDateKey();
-    if (isFirstFridayDateKey(dateKey)) return 'القداس الشهري: 8 ص–12 م';
-    if (isFridayDateKey(dateKey)) return 'الاجتماع: 3–5 م';
-    return 'الحضور يوم الجمعة فقط';
+    if (isFirstFridayDateKey(dateKey)) return 'القداس الشهري: متاح طول اليوم';
+    if (isFridayDateKey(dateKey)) return 'الاجتماع: إضافة النقط متاحة طول اليوم';
+    return 'إضافة النقط يوم الجمعة فقط';
 };
 
 // --- Current student roster whitelist (source rosters only) ---
@@ -280,14 +302,14 @@ const BADGES_CONFIG = [
         check: (history, points, monthPrefix) => {
             const prefix = monthPrefix || getCurrentMonthPrefix();
             const sum = (history || [])
-                .filter(h => h.date && h.date.startsWith(prefix) && h.type === 'participation' && h.typeName !== 'مكافأة لوحة الصدارة' && !(h.meta && h.meta.startsWith('leaderboard_reward_')))
+                .filter(h => h.date && h.date.startsWith(prefix) && h.type === 'participation' && isActivityRecord(h))
                 .reduce((acc, h) => acc + (h.points || 0), 0);
             return sum >= 25;
         },
         getProgress: (history, points, monthPrefix) => {
             const prefix = monthPrefix || getCurrentMonthPrefix();
             const sum = (history || [])
-                .filter(h => h.date && h.date.startsWith(prefix) && h.type === 'participation' && h.typeName !== 'مكافأة لوحة الصدارة' && !(h.meta && h.meta.startsWith('leaderboard_reward_')))
+                .filter(h => h.date && h.date.startsWith(prefix) && h.type === 'participation' && isActivityRecord(h))
                 .reduce((acc, h) => acc + (h.points || 0), 0);
             return `${sum}/25`;
         }
@@ -335,9 +357,9 @@ const BADGES_CONFIG = [
         emoji: '🔥',
         description: 'شارك وتفاعل بتميز في الاجتماع ليجمع 250 نقطة مشاركة أو أكثر تراكمياً',
         color: 'from-orange-500 to-rose-600',
-        check: (history, points, monthPrefix) => (history || []).filter(h => h.type === 'participation').reduce((acc, h) => acc + (h.points || 0), 0) >= 250,
+        check: (history, points, monthPrefix) => (history || []).filter(h => h.type === 'participation' && isActivityRecord(h)).reduce((acc, h) => acc + (h.points || 0), 0) >= 250,
         getProgress: (history, points, monthPrefix) => {
-            const sum = (history || []).filter(h => h.type === 'participation').reduce((acc, h) => acc + (h.points || 0), 0);
+            const sum = (history || []).filter(h => h.type === 'participation' && isActivityRecord(h)).reduce((acc, h) => acc + (h.points || 0), 0);
             return `${sum}/250`;
         }
     },
@@ -358,10 +380,10 @@ const BADGES_CONFIG = [
         categoryName: 'أرقام قياسية وتراكمية',
         name: 'نادي الألف نقطة 💯',
         emoji: '💎',
-        description: 'جمع 1000 نقطة أو أكثر في المجموع الكلي للنقاط',
+        description: 'كسب 1000 نقطة أو أكثر السنة دي (مشتريات الهدايا مابتنقّصش منها)',
         color: 'from-indigo-400 to-violet-600',
-        check: (history, points, monthPrefix) => (points || 0) >= 1000,
-        getProgress: (history, points, monthPrefix) => `${points || 0}/1000`
+        check: (history, points, monthPrefix) => getEarnedPointsFromHistory(history, points) >= 1000,
+        getProgress: (history, points, monthPrefix) => `${getEarnedPointsFromHistory(history, points)}/1000`
     }
 ];
 
@@ -400,14 +422,17 @@ const Modal = ({ isOpen, onClose, title, children }) => {
   if (!isOpen) return null;
   return (
     <div 
-      className="fixed inset-0 bg-black bg-opacity-70 z-50 flex justify-center items-center p-4"
+      className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex justify-center items-center p-3 sm:p-4"
+      style={{ paddingTop: 'max(12px, env(safe-area-inset-top, 0px))', paddingBottom: 'max(12px, env(safe-area-inset-bottom, 0px))' }}
       onClick={onClose}
     >
+      {/* النافذة ليها أقصى طول (قد الشاشة)، والعنوان ثابت فوق، والمحتوى بيتسكرول لو طويل */}
       <div 
-        className="bg-indigo-950 rounded-2xl shadow-xl w-full max-w-md mx-auto text-white border border-indigo-800 transform transition-all"
+        className="glass-modal rounded-3xl shadow-2xl w-full max-w-md mx-auto text-white flex flex-col max-h-full overflow-hidden"
+        style={{ maxHeight: 'min(92dvh, 100%)' }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex justify-between items-center p-4 border-b border-indigo-800">
+        <div className="shrink-0 flex justify-between items-center p-4 border-b border-indigo-800">
           <h2 className="text-xl font-bold text-amber-400">{title}</h2>
           <button 
             onClick={onClose} 
@@ -416,7 +441,7 @@ const Modal = ({ isOpen, onClose, title, children }) => {
             <XIcon className="w-6 h-6" />
           </button>
         </div>
-        <div className="p-6">
+        <div className="p-4 sm:p-6 overflow-y-auto overscroll-contain flex-1 min-h-0" style={{ WebkitOverflowScrolling: 'touch' }}>
           {children}
         </div>
       </div>
@@ -641,14 +666,16 @@ const BarcodeDisplay = ({ studentId }) => {
     );
 };
 
+// الجنيهات = نص النقط، وبتتغير أوتوماتيك مع النقط.
+// لو مينا زوّد أو نقّص جنيهات يدوي، بيتحفظ كـ"فرق" (moneyOffset) فوق الحساب ده،
+// فالجنيهات بتفضل ماشية مع النقط بعد كده بدل ما تتثبت على رقم واحد.
+// (customMoney القديم كان بيثبّت الرقم نهائيًا، فبقى متجاهَل.)
+const getBaseMoney = (pts) => Math.floor((Number(pts) || 0) / 2);
 const getStudentMoney = (student) => {
     if (!student) return 0;
-    if (student.customMoney !== undefined && student.customMoney !== null && student.customMoney !== '') {
-        const val = parseFloat(student.customMoney);
-        if (!isNaN(val)) return val;
-    }
-    const pts = student.pointsForLeaderboard ?? student.points ?? 0;
-    return Math.floor(pts / 2);
+    const pts = student.moneyBasePoints ?? student.pointsForLeaderboard ?? student.points ?? 0;
+    const offset = Number(student.moneyOffset) || 0;
+    return Math.max(0, getBaseMoney(pts) + offset);
 };
 
 
@@ -674,83 +701,10 @@ const getFirstFridayOfFollowingMonth = (baseDate = new Date()) => {
 };
 
 const PointActions = ({ student, addPoints, onActionAfterAdd = null, fromScan = false, selectedDate, isSuperAdmin = false }) => {
-    const [participationPoints, setParticipationPoints] = useState('1');
+    // نوع النقط المتغيرة اللي الخادم بيضيفها (مشاركة / Games / ROOTS / خصم)
+    const [mode, setMode] = useState('participation');
+    const [amount, setAmount] = useState('1');
     const [participationDescription, setParticipationDescription] = useState('');
-    const [gamesStationPoints, setGamesStationPoints] = useState('1');
-    const [rootsPoints, setRootsPoints] = useState('1');
-    const [exchangePoints, setExchangePoints] = useState('5');
-
-    const decrementExchange = () => {
-        setExchangePoints((prev) => {
-            let num = parseInt(prev, 10);
-            if (isNaN(num)) num = 5;
-            const newVal = Math.max(1, num - 1);
-            return String(newVal);
-        });
-    };
-
-    const incrementExchange = () => {
-        setExchangePoints((prev) => {
-            let num = parseInt(prev, 10);
-            if (isNaN(num)) num = 5;
-            const newVal = Math.min(3000, num + 1);
-            return String(newVal);
-        });
-    };
-
-    const decrementParticipation = () => {
-        setParticipationPoints((prev) => {
-            let num = parseInt(prev, 10);
-            if (isNaN(num)) num = 1;
-            const newVal = Math.max(-10, num - 1);
-            return String(newVal);
-        });
-    };
-
-    const incrementParticipation = () => {
-        setParticipationPoints((prev) => {
-            let num = parseInt(prev, 10);
-            if (isNaN(num)) num = 1;
-            const newVal = Math.min(50, num + 1);
-            return String(newVal);
-        });
-    };
-
-    const decrementGamesStation = () => {
-        setGamesStationPoints((prev) => {
-            let num = parseInt(prev, 10);
-            if (isNaN(num)) num = 1;
-            const newVal = Math.max(-50, num - 1);
-            return String(newVal);
-        });
-    };
-
-    const incrementGamesStation = () => {
-        setGamesStationPoints((prev) => {
-            let num = parseInt(prev, 10);
-            if (isNaN(num)) num = 1;
-            const newVal = Math.min(100, num + 1);
-            return String(newVal);
-        });
-    };
-
-    const decrementRoots = () => {
-        setRootsPoints((prev) => {
-            let num = parseInt(prev, 10);
-            if (isNaN(num)) num = 1;
-            const newVal = Math.max(-50, num - 1);
-            return String(newVal);
-        });
-    };
-
-    const incrementRoots = () => {
-        setRootsPoints((prev) => {
-            let num = parseInt(prev, 10);
-            if (isNaN(num)) num = 1;
-            const newVal = Math.min(100, num + 1);
-            return String(newVal);
-        });
-    };
 
     const rules = useMemo(() => {
         if (!student) return {};
@@ -782,9 +736,9 @@ const PointActions = ({ student, addPoints, onActionAfterAdd = null, fromScan = 
 
         return {
             canAddMass: targetIsFirstFriday && !hasReceivedMassThisMonth && meetingTimeAllowed,
-            canAddEarly: targetIsFriday && !targetIsFirstFriday && !hasReceivedAttendanceToday && meetingTimeAllowed && (!isHistoricalEdit ? currentWindow?.kind === 'early' && getCairoDateParts().hour === 15 && getCairoDateParts().minute < 15 : true),
-            canAddLate: targetIsFriday && !targetIsFirstFriday && !hasReceivedAttendanceToday && meetingTimeAllowed && (!isHistoricalEdit ? currentWindow?.kind === 'late' : true),
-            canAddConfession: canAddConfession,
+            canAddEarly: targetIsFriday && !targetIsFirstFriday && !hasReceivedAttendanceToday && meetingTimeAllowed,
+            canAddLate: targetIsFriday && !targetIsFirstFriday && !hasReceivedAttendanceToday && meetingTimeAllowed,
+            canAddConfession: canAddConfession && meetingTimeAllowed,
             canAddGamesStation: regularMeetingTimeAllowed && !hasReceivedGamesStationToday,
             canAddRoots: regularMeetingTimeAllowed && !hasReceivedRootsToday,
             canAddParticipation: regularMeetingTimeAllowed,
@@ -799,8 +753,35 @@ const PointActions = ({ student, addPoints, onActionAfterAdd = null, fromScan = 
             onActionAfterAdd();
         }
     };
-    
+
     if (!student) return null;
+
+    const MODES = {
+        participation: { label: 'مشاركة', emoji: '✨', min: -10, max: 50, def: 1, enabled: rules.canAddParticipation, tone: 'from-amber-500 to-orange-600', ring: 'border-amber-400 text-amber-200 bg-amber-500/20' },
+        gamesStation: { label: 'Games', emoji: '🎮', min: -50, max: 100, def: 1, enabled: rules.canAddGamesStation, tone: 'from-fuchsia-500 to-pink-600', ring: 'border-fuchsia-400 text-fuchsia-200 bg-fuchsia-500/20' },
+        roots: { label: 'ROOTS', emoji: '🌱', min: -50, max: 100, def: 1, enabled: rules.canAddRoots, tone: 'from-emerald-500 to-teal-600', ring: 'border-emerald-400 text-emerald-200 bg-emerald-500/20' },
+        exchange: { label: 'خصم', emoji: '🔄', min: 1, max: 3000, def: 5, enabled: true, tone: 'from-rose-600 to-red-700', ring: 'border-rose-400 text-rose-200 bg-rose-500/20' },
+    };
+    const cfg = MODES[mode];
+    const clamp = (n) => Math.max(cfg.min, Math.min(cfg.max, n));
+    const num = parseInt(amount, 10);
+    const amountOk = !isNaN(num) && amount !== '-' && num !== 0 && num >= cfg.min && num <= cfg.max;
+    const pickMode = (m) => { setMode(m); setAmount(String(MODES[m].def)); };
+    const step = (d) => setAmount(prev => { const n = parseInt(prev, 10); return String(clamp((isNaN(n) ? cfg.def : n) + d)); });
+    const submitAmount = () => {
+        if (!amountOk || !cfg.enabled) return;
+        if (mode === 'exchange') handleAddPoints('exchange', -Math.abs(num));
+        else if (mode === 'participation') { handleAddPoints('participation', num, participationDescription); setParticipationDescription(''); }
+        else handleAddPoints(mode, num);
+        setAmount(String(cfg.def));
+    };
+
+    const quick = [
+        { type: 'monthlyMass', pts: 25, label: 'قداس شهري', emoji: '⛪', ok: rules.canAddMass, tone: 'bg-purple-600' },
+        { type: 'early', pts: 10, label: 'حضور مبكر', emoji: '⏰', ok: rules.canAddEarly, tone: 'bg-green-600' },
+        { type: 'late', pts: 5, label: 'حضور متأخر', emoji: '🚶', ok: rules.canAddLate, tone: 'bg-yellow-600' },
+        { type: 'confession', pts: 15, label: 'اعتراف', emoji: '🙏', ok: rules.canAddConfession, tone: 'bg-rose-600' },
+    ];
 
     return (
         <div className="space-y-3">
@@ -809,334 +790,56 @@ const PointActions = ({ student, addPoints, onActionAfterAdd = null, fromScan = 
                     {rules.windowMessage}
                 </div>
             )}
-            <button
-                onClick={() => handleAddPoints('monthlyMass', 25)}
-                disabled={!rules.canAddMass}
-                className="w-full p-3 text-white font-bold rounded-lg transition-colors bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:cursor-not-allowed"
-            >
-                قداس شهري (+25 نقطة)
-            </button>
-            <button
-                onClick={() => handleAddPoints('early', 10)}
-                disabled={!rules.canAddEarly}
-                className="w-full p-3 text-white font-bold rounded-lg transition-colors bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed"
-            >
-                حضور مبكر (+10 نقاط)
-            </button>
-            <button
-                onClick={() => handleAddPoints('late', 5)}
-                disabled={!rules.canAddLate}
-                className="w-full p-3 text-white font-bold rounded-lg transition-colors bg-yellow-600 hover:bg-yellow-700 disabled:bg-gray-600 disabled:cursor-not-allowed"
-            >
-                حضور متأخر (+5 نقاط)
-            </button>
-             <button
-                onClick={() => handleAddPoints('confession', 15)}
-                disabled={!rules.canAddConfession}
-                className="w-full p-3 text-white font-bold rounded-lg transition-colors bg-rose-600 hover:bg-rose-700 disabled:bg-gray-600 disabled:cursor-not-allowed"
-            >
-                اعتراف (+15 نقطة)
-            </button>
 
-            <div className="!mt-4 pt-4 border-t border-indigo-900/60 space-y-2.5">
-                <label className="text-xs font-black uppercase tracking-wider text-fuchsia-400 flex items-center gap-1.5 mb-1 select-none">
-                    <span className="text-base">🎮</span>
-                    <span>نقاط Games Station</span>
-                </label>
-                <div className="flex items-stretch gap-2.5">
-                    <div className="flex items-center bg-slate-900/60 border border-fuchsia-500/40 rounded-xl overflow-hidden shadow-inner shadow-fuchsia-950/20">
-                        <button
-                            type="button"
-                            onClick={decrementGamesStation}
-                            disabled={!rules.canAddGamesStation}
-                            className="px-3.5 py-2 bg-fuchsia-950/30 hover:bg-fuchsia-900/50 text-fuchsia-400 font-black hover:text-fuchsia-300 transition-colors select-none disabled:opacity-30 disabled:text-gray-500 disabled:bg-transparent text-lg leading-none border-r border-fuchsia-500/10 focus:outline-none"
-                        >
-                            -
-                        </button>
-                        <input
-                            type="number"
-                            id={`games-station-points-${student.id}`}
-                            min="-50"
-                            max="100"
-                            value={gamesStationPoints}
-                            onChange={(e) => {
-                                const value = e.target.value;
-                                if (/^-?[0-9]*$/.test(value)) {
-                                    const num = parseInt(value, 10);
-                                    if ((!isNaN(num) && num >= -50 && num <= 100) || value === '' || value === '-') {
-                                        setGamesStationPoints(value);
-                                    } else if (value.length > 0) {
-                                        const clamped = Math.max(-50, Math.min(100, num));
-                                        setGamesStationPoints(String(clamped));
-                                    }
-                                }
-                            }}
-                            onBlur={() => {
-                                const num = parseInt(gamesStationPoints, 10);
-                                if (isNaN(num) || gamesStationPoints === '' || gamesStationPoints === '-') {
-                                    setGamesStationPoints('1');
-                                } else {
-                                    const clamped = Math.max(-50, Math.min(100, num));
-                                    setGamesStationPoints(String(clamped));
-                                }
-                            }}
-                            className="w-14 bg-transparent border-0 text-fuchsia-100 text-center focus:outline-none focus:ring-0 text-sm font-bold [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none px-1"
-                            disabled={!rules.canAddGamesStation}
-                        />
-                        <button
-                            type="button"
-                            onClick={incrementGamesStation}
-                            disabled={!rules.canAddGamesStation}
-                            className="px-3.5 py-2 bg-fuchsia-950/30 hover:bg-fuchsia-900/50 text-fuchsia-400 font-black hover:text-fuchsia-300 transition-colors select-none disabled:opacity-30 disabled:text-gray-500 disabled:bg-transparent text-lg leading-none border-l border-fuchsia-500/10 focus:outline-none"
-                        >
-                            +
-                        </button>
-                    </div>
-                    <button
-                        onClick={() => {
-                            const points = parseInt(gamesStationPoints, 10);
-                            if (!isNaN(points)) {
-                                handleAddPoints('gamesStation', points);
-                                setGamesStationPoints('1');
-                            }
-                        }}
-                        disabled={!rules.canAddGamesStation || isNaN(parseInt(gamesStationPoints, 10)) || gamesStationPoints === '' || gamesStationPoints === '-'}
-                        className="flex-grow rounded-xl bg-gradient-to-r from-fuchsia-500 to-pink-600 px-4 py-2.5 text-xs md:text-sm font-black text-white shadow-lg shadow-pink-900/20 hover:from-fuchsia-400 hover:to-pink-500 active:scale-[0.98] transition-all disabled:from-indigo-950 disabled:to-indigo-950 disabled:text-indigo-700/60 disabled:cursor-not-allowed disabled:shadow-none disabled:opacity-50 disabled:scale-100 flex items-center justify-center gap-1.5"
-                    >
-                        <span>🎮</span>
-                        <span>إضافة نقاط الـ Games</span>
+            {/* الحضور والاعتراف: زرار واحد لكل نوع */}
+            <div className="grid grid-cols-2 gap-2">
+                {quick.map(q => (
+                    <button key={q.type} type="button" onClick={() => handleAddPoints(q.type, q.pts)} disabled={!q.ok}
+                        className={`flex items-center justify-between gap-1 rounded-xl px-3 py-2.5 text-white font-bold text-sm transition active:scale-[0.97] ${q.ok ? q.tone : 'bg-white/5 text-white/30 cursor-not-allowed'}`}>
+                        <span className="truncate">{q.emoji} {q.label}</span>
+                        <span className={`shrink-0 text-xs font-black rounded-full px-1.5 ${q.ok ? 'bg-black/20' : ''}`}>+{q.pts}</span>
                     </button>
-                </div>
+                ))}
             </div>
 
-            <div className="!mt-4 pt-4 border-t border-indigo-900/60 space-y-2.5">
-                <label className="text-xs font-black uppercase tracking-wider text-emerald-400 flex items-center gap-1.5 mb-1 select-none">
-                    <span className="text-base">🌱</span>
-                    <span>نقاط ROOTS</span>
-                </label>
-                <div className="flex items-stretch gap-2.5">
-                    <div className="flex items-center bg-slate-900/60 border border-emerald-500/40 rounded-xl overflow-hidden shadow-inner shadow-emerald-950/20">
-                        <button
-                            type="button"
-                            onClick={decrementRoots}
-                            disabled={!rules.canAddRoots}
-                            className="px-3.5 py-2 bg-emerald-950/30 hover:bg-emerald-900/50 text-emerald-400 font-black hover:text-emerald-300 transition-colors select-none disabled:opacity-30 disabled:text-gray-500 disabled:bg-transparent text-lg leading-none border-r border-emerald-500/10 focus:outline-none"
-                        >
-                            -
+            {/* النقط المتغيرة: اختار النوع، حدّد العدد، وضيف */}
+            <div className="rounded-2xl border border-white/12 bg-white/5 p-2.5 space-y-2.5">
+                <div className="grid grid-cols-4 gap-1">
+                    {Object.entries(MODES).map(([key, m]: [string, any]) => (
+                        <button key={key} type="button" onClick={() => pickMode(key)}
+                            className={`rounded-lg border py-1.5 text-[11px] font-black transition ${mode === key ? m.ring : 'border-transparent text-white/55'} ${!m.enabled ? 'opacity-40' : ''}`}>
+                            <div className="text-base leading-5">{m.emoji}</div>{m.label}
                         </button>
-                        <input
-                            type="number"
-                            id={`roots-points-${student.id}`}
-                            min="-50"
-                            max="100"
-                            value={rootsPoints}
-                            onChange={(e) => {
-                                const value = e.target.value;
-                                if (/^-?[0-9]*$/.test(value)) {
-                                    const num = parseInt(value, 10);
-                                    if ((!isNaN(num) && num >= -50 && num <= 100) || value === '' || value === '-') {
-                                        setRootsPoints(value);
-                                    } else if (value.length > 0) {
-                                        const clamped = Math.max(-50, Math.min(100, num));
-                                        setRootsPoints(String(clamped));
-                                    }
-                                }
-                            }}
-                            onBlur={() => {
-                                const num = parseInt(rootsPoints, 10);
-                                if (isNaN(num) || rootsPoints === '' || rootsPoints === '-') {
-                                    setRootsPoints('1');
-                                } else {
-                                    const clamped = Math.max(-50, Math.min(100, num));
-                                    setRootsPoints(String(clamped));
-                                }
-                            }}
-                            className="w-14 bg-transparent border-0 text-emerald-100 text-center focus:outline-none focus:ring-0 text-sm font-bold [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none px-1"
-                            disabled={!rules.canAddRoots}
-                        />
-                        <button
-                            type="button"
-                            onClick={incrementRoots}
-                            disabled={!rules.canAddRoots}
-                            className="px-3.5 py-2 bg-emerald-950/30 hover:bg-emerald-900/50 text-emerald-400 font-black hover:text-emerald-300 transition-colors select-none disabled:opacity-30 disabled:text-gray-500 disabled:bg-transparent text-lg leading-none border-l border-emerald-500/10 focus:outline-none"
-                        >
-                            +
-                        </button>
+                    ))}
+                </div>
+                <div className="flex items-stretch gap-2">
+                    <div className="flex items-center rounded-xl border border-white/15 bg-black/20 overflow-hidden">
+                        <button type="button" onClick={() => step(-1)} disabled={!cfg.enabled} className="px-3 py-2 text-lg font-black text-white/80 disabled:opacity-30">−</button>
+                        <input type="text" inputMode="numeric" value={amount} disabled={!cfg.enabled}
+                            onChange={(e) => { const v = e.target.value; if (/^-?[0-9]*$/.test(v)) setAmount(v); }}
+                            onBlur={() => { const n = parseInt(amount, 10); setAmount(isNaN(n) ? String(cfg.def) : String(clamp(n))); }}
+                            className="w-12 bg-transparent text-center text-white font-black focus:outline-none disabled:opacity-40" />
+                        <button type="button" onClick={() => step(1)} disabled={!cfg.enabled} className="px-3 py-2 text-lg font-black text-white/80 disabled:opacity-30">+</button>
                     </div>
-                    <button
-                        onClick={() => {
-                            const points = parseInt(rootsPoints, 10);
-                            if (!isNaN(points)) {
-                                handleAddPoints('roots', points);
-                                setRootsPoints('1');
-                            }
-                        }}
-                        disabled={!rules.canAddRoots || isNaN(parseInt(rootsPoints, 10)) || rootsPoints === '' || rootsPoints === '-'}
-                        className="flex-grow rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 px-4 py-2.5 text-xs md:text-sm font-black text-white shadow-lg shadow-emerald-900/20 hover:from-emerald-400 hover:to-teal-500 active:scale-[0.98] transition-all disabled:from-indigo-950 disabled:to-indigo-950 disabled:text-indigo-700/60 disabled:cursor-not-allowed disabled:shadow-none disabled:opacity-50 disabled:scale-100 flex items-center justify-center gap-1.5"
-                    >
-                        <span>🌱</span>
-                        <span>إضافة نقاط الـ ROOTS</span>
+                    <button type="button" onClick={submitAmount} disabled={!cfg.enabled || !amountOk}
+                        className={`flex-1 rounded-xl bg-gradient-to-r ${cfg.tone} px-3 text-sm font-black text-white transition active:scale-[0.98] disabled:opacity-35 disabled:cursor-not-allowed`}>
+                        {mode === 'exchange' ? `خصم ${amountOk ? Math.abs(num) : 0} نقطة` : `ضيف ${amountOk ? (num > 0 ? `+${num}` : num) : 0} ${cfg.label}`}
                     </button>
                 </div>
-            </div>
-            
-            <div className="!mt-4 pt-4 border-t border-indigo-900/60 space-y-2.5">
-                <label className="text-xs font-black uppercase tracking-wider text-amber-400 flex items-center gap-1.5 mb-1 select-none">
-                    <span className="text-base">✨</span>
-                    <span>نقاط المشاركة</span>
-                </label>
-                <div className="flex items-stretch gap-2.5">
-                    <div className="flex items-center bg-slate-900/60 border border-amber-500/40 rounded-xl overflow-hidden shadow-inner shadow-amber-950/20">
-                        <button
-                            type="button"
-                            onClick={decrementParticipation}
-                            disabled={!rules.canAddParticipation}
-                            className="px-3.5 py-2 bg-amber-950/30 hover:bg-amber-900/50 text-amber-400 font-black hover:text-amber-300 transition-colors select-none disabled:opacity-30 disabled:text-gray-500 disabled:bg-transparent text-lg leading-none border-r border-amber-500/10 focus:outline-none"
-                        >
-                            -
-                        </button>
-                        <input
-                            type="number"
-                            id={`participation-points-${student.id}`}
-                            min="-10"
-                            max="50"
-                            value={participationPoints}
-                            onChange={(e) => {
-                                const value = e.target.value;
-                                if (/^-?[0-9]*$/.test(value)) {
-                                    const num = parseInt(value, 10);
-                                    if ((!isNaN(num) && num >= -10 && num <= 50) || value === '' || value === '-') {
-                                        setParticipationPoints(value);
-                                    } else if (value.length > 0) {
-                                        const clamped = Math.max(-10, Math.min(50, num));
-                                        setParticipationPoints(String(clamped));
-                                    }
-                                }
-                            }}
-                            onBlur={() => {
-                                const num = parseInt(participationPoints, 10);
-                                if (isNaN(num) || participationPoints === '' || participationPoints === '-') {
-                                    setParticipationPoints('1');
-                                } else {
-                                    const clamped = Math.max(-10, Math.min(50, num));
-                                    setParticipationPoints(String(clamped));
-                                }
-                            }}
-                            className="w-14 bg-transparent border-0 text-amber-100 text-center focus:outline-none focus:ring-0 text-sm font-bold [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none px-1"
-                            disabled={!rules.canAddParticipation}
-                        />
-                        <button
-                            type="button"
-                            onClick={incrementParticipation}
-                            disabled={!rules.canAddParticipation}
-                            className="px-3.5 py-2 bg-amber-950/30 hover:bg-amber-900/50 text-amber-400 font-black hover:text-amber-300 transition-colors select-none disabled:opacity-30 disabled:text-gray-500 disabled:bg-transparent text-lg leading-none border-l border-amber-500/10 focus:outline-none"
-                        >
-                            +
-                        </button>
-                    </div>
-                    <button
-                        onClick={() => {
-                            const points = parseInt(participationPoints, 10);
-                            if (!isNaN(points)) {
-                                handleAddPoints('participation', points, participationDescription);
-                                setParticipationDescription('');
-                                setParticipationPoints('1');
-                            }
-                        }}
-                        disabled={!rules.canAddParticipation || isNaN(parseInt(participationPoints, 10)) || participationPoints === '' || participationPoints === '-'}
-                        className="flex-grow rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 px-4 py-2.5 text-xs md:text-sm font-black text-white shadow-lg shadow-amber-900/20 hover:from-amber-400 hover:to-orange-500 active:scale-[0.98] transition-all disabled:from-indigo-950 disabled:to-indigo-950 disabled:text-indigo-700/60 disabled:cursor-not-allowed disabled:shadow-none disabled:opacity-50 disabled:scale-100 flex items-center justify-center gap-1.5"
-                    >
-                        <span>✨</span>
-                        <span>إضافة نقاط المشاركة</span>
-                    </button>
-                </div>
-                <input
-                    type="text"
-                    placeholder="سبب المشاركة (اختياري)"
-                    value={participationDescription}
-                    onChange={(e) => setParticipationDescription(e.target.value)}
-                    className="w-full rounded-xl border border-indigo-900/50 bg-slate-900/40 text-white placeholder-indigo-400/50 focus:border-amber-500 focus:ring-1 focus:ring-amber-500/30 focus:outline-none px-3.5 py-2 text-xs md:text-sm transition-all"
-                    disabled={!rules.canAddParticipation}
-                />
-            </div>
-            
-            {/* Exchange / Redeem Points Section (Negative points only) */}
-            <div className="!mt-4 pt-4 border-t border-indigo-900/60 space-y-2.5">
-                <label className="text-xs font-black uppercase tracking-wider text-rose-400 flex items-center gap-1.5 mb-1 select-none">
-                    <span className="text-base">🔄</span>
-                    <span>تبديل النقاط (خصم بالسالب)</span>
-                </label>
-                <div className="flex items-stretch gap-2.5">
-                    <div className="flex items-center bg-slate-900/60 border border-rose-500/40 rounded-xl overflow-hidden shadow-inner shadow-rose-950/20">
-                        <button
-                            type="button"
-                            onClick={decrementExchange}
-                            className="px-3.5 py-2 bg-rose-950/30 hover:bg-rose-900/50 text-rose-400 font-black hover:text-rose-300 transition-colors select-none text-lg leading-none border-r border-rose-500/10 focus:outline-none"
-                        >
-                            -
-                        </button>
-                        <input
-                            type="number"
-                            id={`exchange-points-${student.id}`}
-                            min="1"
-                            max="3000"
-                            value={exchangePoints}
-                            onChange={(e) => {
-                                const value = e.target.value;
-                                if (/^[0-9]*$/.test(value)) {
-                                    const num = parseInt(value, 10);
-                                    if (!isNaN(num) && num >= 1 && num <= 3000) {
-                                        setExchangePoints(value);
-                                    } else if (value === '') {
-                                        setExchangePoints('');
-                                    } else {
-                                        const clamped = Math.max(1, Math.min(3000, num));
-                                        setExchangePoints(String(clamped));
-                                    }
-                                }
-                            }}
-                            onBlur={() => {
-                                const num = parseInt(exchangePoints, 10);
-                                if (isNaN(num) || exchangePoints === '') {
-                                    setExchangePoints('5');
-                                } else {
-                                    const clamped = Math.max(1, Math.min(3000, num));
-                                    setExchangePoints(String(clamped));
-                                }
-                            }}
-                            className="w-20 bg-transparent border-0 text-rose-100 text-center focus:outline-none focus:ring-0 text-sm font-bold [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none px-1"
-                        />
-                        <button
-                            type="button"
-                            onClick={incrementExchange}
-                            className="px-3.5 py-2 bg-rose-950/30 hover:bg-rose-900/50 text-rose-400 font-black hover:text-rose-300 transition-colors select-none text-lg leading-none border-l border-rose-500/10 focus:outline-none"
-                        >
-                            +
-                        </button>
-                    </div>
-                    <button
-                        onClick={() => {
-                            const rawPts = parseInt(exchangePoints, 10);
-                            if (!isNaN(rawPts) && rawPts > 0) {
-                                const minusPoints = -Math.abs(rawPts);
-                                handleAddPoints('exchange', minusPoints);
-                                setExchangePoints('5');
-                            }
-                        }}
-                        disabled={isNaN(parseInt(exchangePoints, 10)) || parseInt(exchangePoints, 10) <= 0}
-                        className="flex-grow rounded-xl bg-gradient-to-r from-rose-600 to-red-700 px-4 py-2.5 text-xs md:text-sm font-black text-white shadow-lg shadow-rose-900/20 hover:from-rose-500 hover:to-red-600 active:scale-[0.98] transition-all disabled:from-indigo-950 disabled:to-indigo-950 disabled:text-indigo-700/60 disabled:cursor-not-allowed disabled:shadow-none disabled:opacity-50 disabled:scale-100 flex items-center justify-center gap-1.5"
-                    >
-                        <span>🔄</span>
-                        <span>خصم / تبديل النقاط ({!isNaN(parseInt(exchangePoints, 10)) && parseInt(exchangePoints, 10) > 0 ? `-${Math.abs(parseInt(exchangePoints, 10))}` : '0'})</span>
-                    </button>
-                </div>
+                {mode === 'participation' && (
+                    <input type="text" placeholder="سبب المشاركة (اختياري)" value={participationDescription}
+                        onChange={(e) => setParticipationDescription(e.target.value)} disabled={!cfg.enabled}
+                        className="w-full rounded-xl border border-white/12 bg-black/20 text-white placeholder-white/35 focus:outline-none focus:border-amber-400 px-3 py-2 text-xs" />
+                )}
+                {!cfg.enabled && <p className="text-[11px] text-white/45 text-center">{mode === 'participation' ? 'المشاركة متاحة يوم الاجتماع بس.' : `${cfg.label} اتضافت النهارده خلاص، أو مش يوم اجتماع.`}</p>}
             </div>
         </div>
     );
 };
 
 
-const defaultAdminsData = [{"id": "admin_mina_rizk", "name": "مينا رزق", "pin": "pbkdf2$100000$ff1024c3314d991d32a611354d2266d7$5f5c8500dcf3122c8439c0eaa4ad351de1a5f35212bd6124a495417cbc824f60", "isLocked": false, "failedAttempts": 0, "isSuperAdmin": true}, {"id": "admin_shady_sameh", "name": "شادي سامح", "pin": "pbkdf2$100000$178dad37ca427baeb8b384d51ed7260a$310884f1703c51a29688404d0917df71f2bc11fdc6ff9d7dc3ff17994f8ef05f", "isLocked": false, "failedAttempts": 0, "isSuperAdmin": false}, {"id": "admin_mina_moawad", "name": "مينا معوض", "pin": "pbkdf2$100000$ab87994fa84a0f6d2b90858daf68d5c5$2e900ebec6803a8bf9eefa3963d488d7d4590033be9748903ebb906300ccd076", "isLocked": false, "failedAttempts": 0, "isSuperAdmin": false}, {"id": "admin_kirollos_raafat", "name": "كيرلس رأفت", "pin": "pbkdf2$100000$003045eefcef1fe01bb80aacb31664f7$883d70acf53589cc09e188e297417c3961fc79b39de68d05dfdfc461f93768fd", "isLocked": false, "failedAttempts": 0, "isSuperAdmin": false}, {"id": "admin_nagy_wiliam", "name": "ناجي وليم", "pin": "pbkdf2$100000$a4d6ddcb9fcb84958af13458d68314f1$4ae85c6a9b34616eb6d18c047a7111789e7f108463f131ddf38d4f8c55985290", "isLocked": false, "failedAttempts": 0, "isSuperAdmin": false}];
+// قايمة احتياطية بس: بتستخدم لو قايمة الخدام اتمسحت من القاعدة (وده ممنوع بالقواعد).
+const defaultAdminsData = [{"id": "admin_mina_rizk", "name": "مينا رزق", "pin": "pbkdf2$100000$ff1024c3314d991d32a611354d2266d7$5f5c8500dcf3122c8439c0eaa4ad351de1a5f35212bd6124a495417cbc824f60", "isLocked": false, "failedAttempts": 0, "isSuperAdmin": true}];
 
 const mergeStudentsData = (local, dbItems) => {
     if (!Array.isArray(local) || local.length === 0) return dbItems;
@@ -1323,9 +1026,8 @@ const commitListMerge = (docRef: any, baseList: any[], localList: any[]) => runT
 });
 const commitStudentsMerge = (baseList, localList) => commitListMerge(STUDENTS_DOC_REF(), baseList, localList);
 
-// نسخة البنات: بيانات البنات كانت متخزنة في students_v8. أول مرة الموقع الجديد يفتح،
-// بينقلها مرة واحدة لـ students_v9 (والنسخة القديمة بتفضل زي ما هي كنسخة احتياطية).
-// بترجع true لو البيانات بقت موجودة في students_v9، وfalse لو مفيش أي بيانات قديمة خالص.
+// نسخة البنات: بيانات البنات كانت متخزنة في students_v8. لو students_v9 مش موجود،
+// بيتنقل مرة واحدة (والنسخة القديمة بتفضل زي ما هي كنسخة احتياطية).
 const migrateStudentsV8ToV9 = () => runTransaction(db, async (tx) => {
     const v9Ref = STUDENTS_DOC_REF();
     const v9Snap: any = await tx.get(v9Ref);
@@ -1341,6 +1043,95 @@ const commitAdminsMerge = (baseList, localList) => commitListMerge(ADMINS_DOC_RE
 
 const safeParseList = (str) => {
     try { const v = JSON.parse(str || '[]'); return Array.isArray(v) ? v : []; } catch (e) { return []; }
+};
+
+// ============================================================
+// تصدير Excel (.xlsx) حقيقي من غير أي مكتبة خارجية
+// ============================================================
+const XLSX_CRC_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        table[n] = c >>> 0;
+    }
+    return table;
+})();
+const xlsxCrc32 = (bytes) => {
+    let crc = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) crc = XLSX_CRC_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+};
+const xlsxZip = (files) => {
+    const enc = new TextEncoder();
+    const chunks = [];
+    const central = [];
+    let offset = 0;
+    files.forEach(({ name, content }) => {
+        const nameBytes = enc.encode(name);
+        const data = enc.encode(content);
+        const crc = xlsxCrc32(data);
+        const local = new Uint8Array(30 + nameBytes.length);
+        const lv = new DataView(local.buffer);
+        lv.setUint32(0, 0x04034b50, true); lv.setUint16(4, 20, true); lv.setUint16(6, 0x0800, true);
+        lv.setUint16(8, 0, true); lv.setUint16(10, 0, true); lv.setUint16(12, 0x21, true);
+        lv.setUint32(14, crc, true); lv.setUint32(18, data.length, true); lv.setUint32(22, data.length, true);
+        lv.setUint16(26, nameBytes.length, true); lv.setUint16(28, 0, true);
+        local.set(nameBytes, 30);
+        const cen = new Uint8Array(46 + nameBytes.length);
+        const cv = new DataView(cen.buffer);
+        cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true);
+        cv.setUint16(8, 0x0800, true); cv.setUint16(10, 0, true); cv.setUint16(12, 0, true); cv.setUint16(14, 0x21, true);
+        cv.setUint32(16, crc, true); cv.setUint32(20, data.length, true); cv.setUint32(24, data.length, true);
+        cv.setUint16(28, nameBytes.length, true); cv.setUint16(30, 0, true); cv.setUint16(32, 0, true);
+        cv.setUint16(34, 0, true); cv.setUint16(36, 0, true); cv.setUint32(38, 0, true); cv.setUint32(42, offset, true);
+        cen.set(nameBytes, 46);
+        chunks.push(local, data);
+        central.push(cen);
+        offset += local.length + data.length;
+    });
+    const centralSize = central.reduce((n, c) => n + c.length, 0);
+    const end = new Uint8Array(22);
+    const ev = new DataView(end.buffer);
+    ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, files.length, true); ev.setUint16(10, files.length, true);
+    ev.setUint32(12, centralSize, true); ev.setUint32(16, offset, true);
+    return new Blob([...chunks, ...central, end], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+};
+const xlsxEsc = (v) => String(v ?? '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const xlsxColName = (i) => { let s = ''; i += 1; while (i > 0) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); } return s; };
+const xlsxSheetXml = (rows, colWidths) => {
+    const cols = (colWidths || []).map((w, i) => `<col min="${i + 1}" max="${i + 1}" width="${w}" customWidth="1"/>`).join('');
+    const body = rows.map((row, r) => `<row r="${r + 1}">${row.map((cell, c) => {
+        const ref = `${xlsxColName(c)}${r + 1}`;
+        const style = r === 0 ? ' s="1"' : '';
+        if (typeof cell === 'number' && Number.isFinite(cell)) return `<c r="${ref}"${style}><v>${cell}</v></c>`;
+        return `<c r="${ref}" t="inlineStr"${style}><is><t xml:space="preserve">${xlsxEsc(cell)}</t></is></c>`;
+    }).join('')}</row>`).join('');
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView rightToLeft="1" workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>${cols ? `<cols>${cols}</cols>` : ''}<sheetData>${body}</sheetData></worksheet>`;
+};
+const buildXlsx = (sheets) => {
+    const safeName = (n, i) => xlsxEsc(String(n || `Sheet${i + 1}`).replace(/[\\/?*[\]:]/g, ' ').slice(0, 31));
+    const files = [
+        { name: '[Content_Types].xml', content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}</Types>` },
+        { name: '_rels/.rels', content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>` },
+        { name: 'xl/workbook.xml', content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView/></bookViews><sheets>${sheets.map((s, i) => `<sheet name="${safeName(s.name, i)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets></workbook>` },
+        { name: 'xl/_rels/workbook.xml.rels', content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('')}<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>` },
+        { name: 'xl/styles.xml', content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Arial"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Arial"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF312E81"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>` },
+        ...sheets.map((s, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, content: xlsxSheetXml(s.rows, s.widths) })),
+    ];
+    return xlsxZip(files);
+};
+const downloadBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 
 // --- App Component ---
@@ -1379,6 +1170,44 @@ const App = () => {
     const [toastMessage, setToastMessage] = useState(null);
     
     const [loggedInAdmin, setLoggedInAdmin] = useState(null);
+    // خادم "افتقاد بس": يشوف مجموعته ويفتقدها، ومايقدرش يضيف نقط ولا يعدّل أو يمسح أي حاجة
+    const isFollowupOnlyAdmin = (a) => Boolean(a && a.role === 'followup');
+    // الأدوار: افتقاد بس ← خادم كامل ← أمين فصل ← مساعد أمين عام ← أمين عام (السوبر أدمن)
+    const ROLE_INFO = {
+        followup: { icon: '📞', title: 'افتقاد بس', desc: 'يفتقد مجموعته ويكتب ملاحظات. مايضيفش نقط ولا يعدّل حاجة.' },
+        full: { icon: '🛠️', title: 'خادم كامل', desc: 'يسجّل حضور ونقط، ويضيف ويعدّل بنات، ويفتقد.' },
+        class_leader: { icon: '🎓', title: 'أمين فصل', desc: 'خادم كامل + يتابع خدام صفّه وملاحظاتهم ويوزّع مجموعاته.' },
+        assistant: { icon: '⭐', title: 'مساعد أمين عام', desc: 'خادم كامل + يتابع خدام كل الصفوف وملاحظاتهم.' },
+    };
+    const adminRoleKey = (a) => (['followup', 'class_leader', 'assistant'].includes(a?.role) ? a.role : 'full');
+    // نطاق المتابعة: 'all' = كل الصفوف، أو اسم صف، أو '' = مالوش متابعة
+    const oversightScopeOf = (a) => {
+        if (!a) return '';
+        if (a.isSuperAdmin || a.role === 'assistant') return 'all';
+        if (a.role === 'class_leader' && a.leaderGrade) return String(a.leaderGrade).trim();
+        return '';
+    };
+    // لو مينا غيّر صلاحية خادم أو عطّل حسابه وهو داخل، التغيير بيسري عليه فورًا
+    useEffect(() => {
+        if (!loggedInAdmin) return;
+        const live = admins.find(a => a.id === loggedInAdmin.id);
+        if (!live) return;
+        if (live.isLocked && !live.isSuperAdmin) {
+            setLoggedInAdmin(null);
+            return;
+        }
+        if ((live.role || '') !== (loggedInAdmin.role || '') || (live.leaderGrade || '') !== (loggedInAdmin.leaderGrade || '')) {
+            setLoggedInAdmin(prev => prev ? { ...prev, role: live.role, leaderGrade: live.leaderGrade } : prev);
+            if (live.role === 'followup') setActiveView('followup');
+        }
+    }, [admins, loggedInAdmin]);
+    const blockFollowupOnly = () => {
+        if (isFollowupOnlyAdmin(loggedInAdmin)) {
+            showToast('⚠️ حسابك للافتقاد بس.');
+            return true;
+        }
+        return false;
+    };
     const [isAuthModalOpen, setAuthModalOpen] = useState(false);
     const [selectedAdmin, setSelectedAdmin] = useState(null);
     const [pinInput, setPinInput] = useState('');
@@ -1392,6 +1221,36 @@ const App = () => {
     const [expandedDate, setExpandedDate] = useState(null); // For stats expansion
     const [expandedSummaryStudentKey, setExpandedSummaryStudentKey] = useState(null); // format: "date-studentId"
     const [leaderboardFilter, setLeaderboardFilter] = useState('all'); // 'all', 'current_month', 'prev_month'
+    // الافتقاد: مين مسئول عن كل ولد، ومين اتافتقد (متخزن في appData/followup_v1)
+    const [followup, setFollowup] = useState<{ assignments: Record<string, string>; contacts: Record<string, any> }>({ assignments: {}, contacts: {} });
+    const [followupTab, setFollowupTab] = useState('report'); // المتابعة: 'report' | 'notes' | 'groups'
+    const [oversightGrade, setOversightGrade] = useState('all');
+    const [showWholeGroup, setShowWholeGroup] = useState(false);
+    // الملاحظات (متخزنة في appData/notes_v1)
+    const [notesData, setNotesData] = useState<Record<string, Record<string, any>>>({});
+    const [notesStudentId, setNotesStudentId] = useState('');
+    // سجل الافتقاد لكل اجتماع (علشان التقرير الشهري) — appData/followup_history_v1
+    const [followupHistory, setFollowupHistory] = useState<Record<string, Record<string, any>>>({});
+    const [fridayMeetingDate, setFridayMeetingDate] = useState('');
+    const [atRiskOpen, setAtRiskOpen] = useState(true);
+    const [monthReportOpen, setMonthReportOpen] = useState(false);
+    const [monthReportPrefix, setMonthReportPrefix] = useState('');
+    // الافتقاد مابيتحسبش بمجرد الضغط: الخادم لازم يرجع ويقول حصل إيه
+    const [pendingContact, setPendingContact] = useState<any>(() => {
+        try {
+            const p = JSON.parse(appStorage.getItem('pending_followup_contact') || 'null');
+            return p && Date.now() - Number(p.startedAt || 0) < 6 * 3600 * 1000 ? p : null;
+        } catch (e) { return null; }
+    });
+    const [outcomeModal, setOutcomeModal] = useState<any>(null);
+    const [outcomeNote, setOutcomeNote] = useState('');
+    const hiddenAtRef = useRef(0);
+    const [noteDraft, setNoteDraft] = useState('');
+    const [followupGrade, setFollowupGrade] = useState('أولى ثانوي');
+    const [followupAssignPickerOpen, setFollowupAssignPickerOpen] = useState(false);
+    const [followupReassignAll, setFollowupReassignAll] = useState(false);
+    const [expandedReportServant, setExpandedReportServant] = useState('');
+    const [followupAssignServants, setFollowupAssignServants] = useState<string[]>([]);
     const [selectedBadgeDetail, setSelectedBadgeDetail] = useState(null);
     
     // Manual Monthly Champion & Badges Reward States
@@ -1422,6 +1281,9 @@ const App = () => {
     
     const [newAdminName, setNewAdminName] = useState('');
     const [newAdminPin, setNewAdminPin] = useState('');
+    const [newAdminRole, setNewAdminRole] = useState('followup'); // followup | full | class_leader | assistant
+    const [newAdminGrade, setNewAdminGrade] = useState('أولى ثانوي');
+    const [adminSectionOpen, setAdminSectionOpen] = useState(''); // 'add' | 'pin' | 'season'
     const [editingAdminId, setEditingAdminId] = useState(null);
     const [editingAdminPinValue, setEditingAdminPinValue] = useState('');
     const [ownPinCurrent, setOwnPinCurrent] = useState('');
@@ -1583,7 +1445,6 @@ const App = () => {
     //  فأي رقم سري اتغيّر أو خادم اتضاف كان بيرجع للقديم.)
     const studentsLoadedFromServer = useRef(false);
     const adminsLoadedFromServer = useRef(false);
-    const v8MigrationStarted = useRef(false);
 
     const lastStudentsDB = useRef<string>(appStorage.getItem('church_attendance_students_v9') || '[]');
     // مراقبة حجم بيانات الطلاب (الحد الأقصى لـFirebase 1 ميجا للمستند الواحد)
@@ -1606,6 +1467,7 @@ const App = () => {
     }, [admins]);
 
     const isRosterMigrationInProgress = useRef(false);
+    const v8MigrationStarted = useRef(false);
 
     // Initialize Data from Firebase with Offline-Resilient Merging
     useEffect(() => {
@@ -1631,18 +1493,16 @@ const App = () => {
                     setStudents([]);
                 }
             } else {
-                // students_v9 لسه مش موجود: ننقل بيانات students_v8 القديمة مرة واحدة.
-                // لحد ما النقل يخلص مفيش أي حفظ بيحصل، عشان محدش يكتب قايمة فاضية فوق البنات.
+                // students_v9 مش موجود: ننقل بيانات students_v8 القديمة مرة واحدة،
+                // ولحد ما النقل يخلص مفيش أي حفظ بيحصل.
                 if (v8MigrationStarted.current) return;
                 v8MigrationStarted.current = true;
                 migrateStudentsV8ToV9()
                     .then((hasData: boolean) => {
                         if (!hasData) {
-                            // مشروع جديد خالص ومفيش بيانات قديمة
                             studentsLoadedFromServer.current = true;
                             setStudents([]);
                         }
-                        // لو النقل نجح، التحديث بيوصل لوحده من قاعدة البيانات
                     })
                     .catch(err => {
                         console.error('Error moving students_v8 to students_v9:', err);
@@ -1815,6 +1675,7 @@ const App = () => {
     // Automatic monthly champion rewards removed in favor of manual servant control
 
     const addStudent = useCallback(() => {
+        if (loggedInAdmin?.role === 'followup') { showToast('⚠️ حسابك للافتقاد بس.'); return; }
         if (!newStudentName.trim()) {
             showToast('الرجاء إدخال الاسم');
             return;
@@ -1851,28 +1712,38 @@ const App = () => {
         setNewStudentGrade('');
         setAddStudentModalOpen(false);
         showToast(`تمت إضافة "${trimmedName}" بنجاح`);
-    }, [newStudentName, newStudentPhone, newStudentGrade, students, showToast]);
+    }, [newStudentName, newStudentPhone, newStudentGrade, students, showToast, loggedInAdmin]);
     
     const addPoints = useCallback((studentId, type, points, fromScan = false, description = null) => {
         if (!loggedInAdmin) {
             showToast('يجب تسجيل الدخول أولاً لإضافة نقاط.');
             return;
         }
+        if (loggedInAdmin.role === 'followup') {
+            showToast('⚠️ حسابك للافتقاد بس.');
+            return;
+        }
         // Use selectedDate only for super-admin historical edits; otherwise use Cairo's current date.
         const dateToRecord = loggedInAdmin.isSuperAdmin && selectedDate && !fromScan ? selectedDate : getCairoDateKey();
         const isHistoricalEdit = loggedInAdmin.isSuperAdmin && Boolean(selectedDate) && selectedDate !== getCairoDateKey() && !fromScan;
 
-        if (['early', 'late', 'monthlyMass', 'participation', 'gamesStation', 'roots'].includes(type) && !isHistoricalEdit) {
+        if (!isHistoricalEdit) {
             const windowState = getAttendanceWindow();
-            const allowed = type === 'monthlyMass'
-                ? windowState.kind === 'monthlyMass' && windowState.isWithinAllowedTime
-                : type === 'early'
-                    ? windowState.kind === 'early' && windowState.isWithinAllowedTime && getCairoDateParts().hour === 15 && getCairoDateParts().minute < 15
-                    : type === 'late'
-                        ? windowState.kind === 'late' && windowState.isWithinAllowedTime
-                        : windowState.isWithinAllowedTime && windowState.kind !== 'monthlyMass';
-            if (!allowed) {
+            if (!windowState.isWithinAllowedTime) {
                 showToast(windowState.message);
+                return;
+            }
+            const allowed = type === 'monthlyMass'
+                ? windowState.kind === 'monthlyMass'
+                : (type === 'early' || type === 'late')
+                    ? windowState.kind === 'meeting'
+                    : (type === 'participation' || type === 'gamesStation' || type === 'roots')
+                        ? windowState.kind !== 'monthlyMass'
+                        : true;
+            if (!allowed) {
+                showToast(windowState.kind === 'monthlyMass'
+                    ? '⚠️ النهارده أول جمعة في الشهر (القداس الشهري)، مفيش حضور اجتماع.'
+                    : '⚠️ القداس الشهري بيتسجل في أول جمعة من الشهر بس.');
                 return;
             }
         }
@@ -1901,6 +1772,14 @@ const App = () => {
                 );
                 if (alreadyRegistered) {
                     showToast(`تم تسجيل القداس الشهري لـ ${student.name} بالفعل هذا الشهر.`);
+                    return prevStudents;
+                }
+            }
+
+            if (type === 'confession') {
+                const targetMonth = dateToRecord.slice(0, 7);
+                if (student.attendanceHistory.some(h => h.type === 'confession' && h.date && h.date.startsWith(targetMonth))) {
+                    showToast(`تم تسجيل الاعتراف لـ ${student.name} بالفعل هذا الشهر.`);
                     return prevStudents;
                 }
             }
@@ -2011,6 +1890,7 @@ const App = () => {
         }
         if (pinOk) {
             setLoggedInAdmin(adminToLogin);
+            if (adminToLogin.role === 'followup') setActiveView('followup');
             setAuthModalOpen(false);
             showToast(`أهلاً بك, ${adminToLogin.name}`);
             
@@ -2081,6 +1961,7 @@ const App = () => {
 
     const handleSaveStudentEdit = (studentId) => {
         if (!editingStudent) return;
+        if (blockFollowupOnly()) return;
         
         const newName = editingStudent.name.trim();
         const newPhone = editingStudent.phone.trim();
@@ -2144,6 +2025,7 @@ const App = () => {
             return;
         }
         if (!studentToDelete) return;
+        if (blockFollowupOnly()) return;
         const updatedStudents = students.filter(s => s.id !== studentToDelete.id);
         setStudents(updatedStudents);
         showToast(`تم حذف ${studentToDelete.name} بنجاح.`);
@@ -2161,7 +2043,14 @@ const App = () => {
             return;
         }
         if (!pointToDelete) return;
+        if (blockFollowupOnly()) { setPointToDelete(null); return; }
         const { studentId, record } = pointToDelete;
+        if (isGiftRecord(record)) {
+            // مسح سجل شراء هدية من هنا كان بيرجّع النقط والطلب لسه محجوز (ولو اتلغى بعدين النقط بترجع مرتين)
+            showToast('⚠️ ده سجل من متجر الهدايا. لو عايز ترجّع النقط، الغِ الطلب من متجر الهدايا.');
+            setPointToDelete(null);
+            return;
+        }
 
         const updatedStudents = students.map(student => {
             if (student.id === studentId) {
@@ -2202,13 +2091,28 @@ const App = () => {
             pin: await hashPin(pin),
             isLocked: false,
             failedAttempts: 0,
-            isSuperAdmin: false
+            isSuperAdmin: false,
+            role: ROLE_INFO[newAdminRole] ? newAdminRole : 'followup',
+            ...(newAdminRole === 'class_leader' ? { leaderGrade: newAdminGrade } : {}),
         };
 
         setAdmins(prev => [...prev, newAdmin]);
         setNewAdminName('');
         setNewAdminPin('');
-        showToast(`تم إضافة الخادم "${name}" بنجاح.`);
+        setNewAdminRole('followup');
+        setAdminSectionOpen('');
+        showToast(`تم إضافة الخادم "${name}" (${(ROLE_INFO[newAdminRole] || ROLE_INFO.followup).title}${newAdminRole === 'class_leader' ? ` - ${newAdminGrade}` : ''}) بنجاح.`);
+    };
+
+    const handleSetAdminRole = (adminId, role, grade = '') => {
+        if (!loggedInAdmin?.isSuperAdmin || !ROLE_INFO[role]) return;
+        setAdmins(prev => prev.map(a => {
+            if (a.id !== adminId || a.isSuperAdmin) return a;
+            const { leaderGrade, ...rest } = a;
+            const g = role === 'class_leader' ? (grade || leaderGrade || 'أولى ثانوي') : '';
+            showToast(`${a.name}: بقى ${ROLE_INFO[role].title}${g ? ` (${g})` : ''}`);
+            return role === 'class_leader' ? { ...rest, role, leaderGrade: g } : { ...rest, role };
+        }));
     };
 
     const handleUnlockAdminByFailure = (adminId) => {
@@ -2285,7 +2189,7 @@ const App = () => {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `church_attendance_backup_${getCairoDateKey()}.json`;
+        a.download = `tiparthenos_backup_${getCairoDateKey()}.json`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -2420,7 +2324,7 @@ const App = () => {
             .map(student => {
                 const prevPoints = (student.attendanceHistory || [])
                     .filter(h => h.date && h.date.startsWith(prevMonthPrefix))
-                    .filter(h => h.typeName !== 'مكافأة لوحة الصدارة' && !(h.meta && h.meta.startsWith('leaderboard_reward_')))
+                    .filter(isActivityRecord)
                     .reduce((sum, h) => sum + Number(h.points || 0), 0);
                 return {
                     ...student,
@@ -2447,11 +2351,11 @@ const App = () => {
             // 1. Triple Monthly Badges for Current Month (بطل الشهر الحالي)
             const currentHasAllMonthly = BADGES_CONFIG.filter(b => b.category === 'monthly').every(b => b.check(history, pts, currentMonthPrefix));
             if (currentHasAllMonthly) {
-                const currentMonthAwardRecord = history.find(h => 
+                const currentMonthAwardRecord = history.find(h => !(typeof h.meta === 'string' && h.meta.startsWith('leaderboard_reward_')) && (
                     (h.meta && (h.meta.includes(`monthly_all_${currentMonthPrefix}`) || h.meta.includes(`badge_reward_monthly_all_${currentMonthPrefix}`))) ||
                     (h.typeName === 'مكافأة تجميع الأوسمة' && h.date && h.date.startsWith(currentMonthPrefix)) ||
                     (h.description && (h.description.includes('تجميع الأوسمة') || h.description.includes('مكافأة الأوسمة')) && h.date && h.date.startsWith(currentMonthPrefix))
-                );
+                ));
                 alerts.push({
                     id: `monthly_all_${currentMonthPrefix}_${student.id}`,
                     studentId: student.id,
@@ -2464,11 +2368,11 @@ const App = () => {
                     categoryLabel: 'أوسمة شهرية (بطل الشهر)',
                     periodLabel: getArabicMonthName(currentMonthPrefix),
                     monthPrefix: currentMonthPrefix,
-                    description: 'حقق جميع متطلبات أوسمة الشهر الحالي (حضور 3:00–3:15 م ثلاث مرات، قداس شهري 1+، مشاركة 25+ نقطة)',
+                    description: 'حقق جميع متطلبات أوسمة الشهر الحالي (حضور مبكر 3 مرات، قداس شهري 1+، مشاركة 25+ نقطة)',
                     progress: '3/3 أوسمة مكتملة',
                     isAwarded: !!currentMonthAwardRecord,
                     awardedRecord: currentMonthAwardRecord,
-                    suggestedPoints: 10,
+                    suggestedPoints: 15,
                     color: 'from-amber-400 to-yellow-500'
                 });
             }
@@ -2476,11 +2380,11 @@ const App = () => {
             // 2. Triple Monthly Badges for Previous Month (بطل الشهر السابق)
             const prevHasAllMonthly = BADGES_CONFIG.filter(b => b.category === 'monthly').every(b => b.check(history, pts, prevMonthPrefix));
             if (prevHasAllMonthly) {
-                const prevMonthAwardRecord = history.find(h => 
+                const prevMonthAwardRecord = history.find(h => !(typeof h.meta === 'string' && h.meta.startsWith('leaderboard_reward_')) && (
                     (h.meta && (h.meta.includes(`monthly_all_${prevMonthPrefix}`) || h.meta.includes(`badge_reward_monthly_all_${prevMonthPrefix}`))) ||
                     (h.typeName === 'مكافأة تجميع الأوسمة' && h.date && (h.date.startsWith(prevMonthPrefix) || h.date.startsWith(currentMonthPrefix))) ||
                     (h.description && (h.description.includes('تجميع الأوسمة') || h.description.includes('مكافأة الأوسمة')) && (h.description.includes(getArabicMonthName(prevMonthPrefix).split(' ')[0]) || h.date?.startsWith(prevMonthPrefix)))
-                );
+                ));
                 alerts.push({
                     id: `monthly_all_${prevMonthPrefix}_${student.id}`,
                     studentId: student.id,
@@ -2493,57 +2397,14 @@ const App = () => {
                     categoryLabel: 'أوسمة شهرية (الشهر السابق)',
                     periodLabel: getArabicMonthName(prevMonthPrefix),
                     monthPrefix: prevMonthPrefix,
-                    description: 'حقق جميع متطلبات أوسمة الشهر السابق كاملة، بما فيها 3 مرات حضور بين 3:00 و3:15 م',
+                    description: 'حقق جميع متطلبات أوسمة الشهر السابق كاملة، بما فيها 3 مرات حضور مبكر',
                     progress: '3/3 أوسمة مكتملة',
                     isAwarded: !!prevMonthAwardRecord,
                     awardedRecord: prevMonthAwardRecord,
-                    suggestedPoints: 10,
+                    suggestedPoints: 15,
                     color: 'from-yellow-500 to-amber-600'
                 });
             }
-
-            // 3. Monthly leaderboard rewards for the previous month (manual notification only)
-            const prevMonthRanking = [...students]
-                .map(candidate => {
-                    const prevPoints = (candidate.attendanceHistory || [])
-                        .filter(h => h.date && h.date.startsWith(prevMonthPrefix))
-                        .filter(h => h.typeName !== 'مكافأة لوحة الصدارة' && !(h.meta && h.meta.startsWith('leaderboard_reward_')))
-                        .reduce((sum, h) => sum + Number(h.points || 0), 0);
-                    return { candidate, prevPoints };
-                })
-                .filter(item => item.prevPoints > 0)
-                .sort((a, b) => b.prevPoints - a.prevPoints || a.candidate.name.localeCompare(b.candidate.name, 'ar'))
-                .slice(0, 3);
-
-            prevMonthRanking.forEach((item, index) => {
-                const rank = index + 1;
-                const rankTitles = ['المركز الأول', 'المركز الثاني', 'المركز الثالث'];
-                const rankPoints = [20, 15, 10];
-                const rankEmojis = ['🥇', '🥈', '🥉'];
-                const candidate = item.candidate;
-                const awardMeta = `leaderboard_reward_${prevMonthPrefix}_rank_${rank}`;
-                const awardRecord = (candidate.attendanceHistory || []).find(h => h.meta === awardMeta);
-
-                alerts.push({
-                    id: `leaderboard_${prevMonthPrefix}_rank_${rank}_${candidate.id}`,
-                    studentId: candidate.id,
-                    studentName: candidate.name,
-                    student: candidate,
-                    badgeId: `leaderboard_rank_${rank}`,
-                    badgeTitle: `${rankEmojis[index]} ${rankTitles[index]} في الشهر`,
-                    badgeEmoji: rankEmojis[index],
-                    category: 'monthly',
-                    categoryLabel: 'مكافآت ترتيب الشهر',
-                    periodLabel: getArabicMonthName(prevMonthPrefix),
-                    monthPrefix: prevMonthPrefix,
-                    description: `أنهى الشهر في ${rankTitles[index]} برصيد ${item.prevPoints} نقطة قبل مكافآت ترتيب الشهر.`,
-                    progress: `${item.prevPoints} نقطة`,
-                    isAwarded: !!awardRecord,
-                    awardedRecord: awardRecord,
-                    suggestedPoints: rankPoints[index],
-                    color: index === 0 ? 'from-amber-400 to-yellow-500' : index === 1 ? 'from-slate-300 to-slate-500' : 'from-orange-400 to-amber-700'
-                });
-            });
 
             // 3. Cumulative / Milestone Badges (أوسمة تراكمية وموسمية)
             BADGES_CONFIG.filter(b => b.category === 'cumulative').forEach(badge => {
@@ -2574,34 +2435,54 @@ const App = () => {
                 }
             });
 
-            // 4. Single Monthly Badges for Current Month (أوسمة شهرية مفردة)
-            BADGES_CONFIG.filter(b => b.category === 'monthly').forEach(badge => {
-                const isUnlocked = badge.check(history, pts, currentMonthPrefix);
-                if (isUnlocked) {
-                    const singleAwardRecord = history.find(h =>
-                        (h.meta && h.meta.includes(`badge_reward_${badge.id}_${currentMonthPrefix}`)) ||
-                        (h.description && h.description.includes(badge.name) && h.date && h.date.startsWith(currentMonthPrefix))
-                    );
-                    alerts.push({
-                        id: `monthly_single_${badge.id}_${currentMonthPrefix}_${student.id}`,
-                        studentId: student.id,
-                        studentName: student.name,
-                        student,
-                        badgeId: badge.id,
-                        badgeTitle: `وسام: ${badge.name}`,
-                        badgeEmoji: badge.emoji,
-                        category: 'monthly_single',
-                        categoryLabel: 'وسام شهري مفرد',
-                        periodLabel: getArabicMonthName(currentMonthPrefix),
-                        monthPrefix: currentMonthPrefix,
-                        description: badge.description,
-                        progress: badge.getProgress(history, pts, currentMonthPrefix),
-                        isAwarded: !!singleAwardRecord,
-                        awardedRecord: singleAwardRecord,
-                        suggestedPoints: 10,
-                        color: badge.color
-                    });
-                }
+            // (الأوسمة الشهرية لوحدها مالهاش مكافأة: المكافأة بس للي يكمّل الـ3 أوسمة = 15 نقطة)
+        });
+
+        // 3. مكافآت ترتيب الشهر اللي فات (أول 3): بتتحسب مرة واحدة بس للكل.
+        // (قبل كده كانت جوه اللوب بتاع كل طالب، فكانت بتتكرر مرة لكل ولد: 87 × 3 = 261 تنبيه)
+        const prevMonthRanking = [...students]
+            .map(candidate => {
+                const prevPoints = (candidate.attendanceHistory || [])
+                    .filter(h => h.date && h.date.startsWith(prevMonthPrefix))
+                    .filter(isActivityRecord)
+                    .reduce((sum, h) => sum + Number(h.points || 0), 0);
+                return { candidate, prevPoints };
+            })
+            .filter(item => item.prevPoints > 0)
+            .sort((a, b) => b.prevPoints - a.prevPoints || a.candidate.name.localeCompare(b.candidate.name, 'ar'));
+        // التعادل: اللي متساويين في النقط بياخدوا نفس المركز ونفس المكافأة،
+        // واللي بعدهم بياخد المركز اللي عليه الدور (مثال: الأول، الثاني، الثاني، الثالث)
+        const topScores = [...new Set(prevMonthRanking.map(item => item.prevPoints))].slice(0, 3);
+
+        prevMonthRanking.filter(item => topScores.includes(item.prevPoints)).forEach((item) => {
+            const index = topScores.indexOf(item.prevPoints);
+            const rank = index + 1;
+            const rankTitles = ['المركز الأول', 'المركز الثاني', 'المركز الثالث'];
+            const rankPoints = [20, 15, 10];
+            const rankEmojis = ['🥇', '🥈', '🥉'];
+            const candidate = item.candidate;
+            // لو الولد اتصرفتله مكافأة ترتيب الشهر ده قبل كده (بأي مركز)، مايتصرفلوش تاني،
+            // حتى لو ترتيبه اتغير بعدين (تعادل، أو استعادة نسخة احتياطية)
+            const awardRecord = (candidate.attendanceHistory || []).find(h => typeof h.meta === 'string' && h.meta.startsWith(`leaderboard_reward_${prevMonthPrefix}_rank_`));
+
+            alerts.push({
+                id: `leaderboard_${prevMonthPrefix}_rank_${rank}_${candidate.id}`,
+                studentId: candidate.id,
+                studentName: candidate.name,
+                student: candidate,
+                badgeId: `leaderboard_rank_${rank}`,
+                badgeTitle: `${rankEmojis[index]} ${rankTitles[index]} في الشهر`,
+                badgeEmoji: rankEmojis[index],
+                category: 'monthly',
+                categoryLabel: 'مكافآت ترتيب الشهر',
+                periodLabel: getArabicMonthName(prevMonthPrefix),
+                monthPrefix: prevMonthPrefix,
+                description: `أنهى الشهر في ${rankTitles[index]} برصيد ${item.prevPoints} نقطة قبل مكافآت ترتيب الشهر.`,
+                progress: `${item.prevPoints} نقطة`,
+                isAwarded: !!awardRecord,
+                awardedRecord: awardRecord,
+                suggestedPoints: rankPoints[index],
+                color: index === 0 ? 'from-amber-400 to-yellow-500' : index === 1 ? 'from-slate-300 to-slate-500' : 'from-orange-400 to-amber-700'
             });
         });
 
@@ -2647,7 +2528,11 @@ const App = () => {
         const targetMeta = alertItem.badgeId?.startsWith('leaderboard_rank_')
             ? `leaderboard_reward_${alertItem.monthPrefix}_rank_${alertItem.badgeId.replace('leaderboard_rank_', '')}`
             : `badge_reward_${alertItem.id}`;
-        if ((targetStudent.attendanceHistory || []).some(h => h.meta === targetMeta)) {
+        const isLeaderboardReward = Boolean(alertItem.badgeId?.startsWith('leaderboard_rank_'));
+        const alreadyRewarded = (targetStudent.attendanceHistory || []).some(h =>
+            h.meta === targetMeta ||
+            (isLeaderboardReward && typeof h.meta === 'string' && h.meta.startsWith(`leaderboard_reward_${alertItem.monthPrefix}_rank_`)));
+        if (alreadyRewarded) {
             showToast('تم منح مكافأة هذا الوسام بالفعل.');
             return;
         }
@@ -2658,7 +2543,7 @@ const App = () => {
             date: recordDate,
             points: pts,
             type: 'participation',
-            typeName: alertItem.category.startsWith('monthly') ? 'مكافأة تجميع الأوسمة' : 'مكافأة إنجاز وسام',
+            typeName: isLeaderboardReward ? 'مكافأة لوحة الصدارة' : (alertItem.category.startsWith('monthly') ? 'مكافأة تجميع الأوسمة' : 'مكافأة إنجاز وسام'),
             description: `مكافأة ${alertItem.badgeTitle} (${alertItem.periodLabel})`,
             recordedBy: loggedInAdmin.name,
             meta: targetMeta
@@ -2687,23 +2572,26 @@ const App = () => {
 
         return [...students]
             .map(student => {
-                let filteredPoints = student.points || 0;
+                // "الكل": النقط اللي الولد كسبها السنة دي (الشراء من المتجر مابينزّلوش في الترتيب)
+                let filteredPoints = getEarnedPointsFromHistory(student.attendanceHistory, student.points);
                 
                 if (leaderboardFilter === 'current_month') {
                     filteredPoints = (student.attendanceHistory || [])
                         .filter(h => h.date && h.date.startsWith(currentMonthPrefix))
-                        .filter(h => h.typeName !== 'مكافأة لوحة الصدارة' && !(h.meta && h.meta.startsWith('leaderboard_reward_')))
+                        .filter(isActivityRecord)
                         .reduce((sum, h) => sum + Number(h.points || 0), 0);
                 } else if (leaderboardFilter === 'prev_month') {
                     filteredPoints = (student.attendanceHistory || [])
                         .filter(h => h.date && h.date.startsWith(prevMonthPrefix))
-                        .filter(h => h.typeName !== 'مكافأة لوحة الصدارة' && !(h.meta && h.meta.startsWith('leaderboard_reward_')))
+                        .filter(isActivityRecord)
                         .reduce((sum, h) => sum + Number(h.points || 0), 0);
                 }
                 
                 return {
                     ...student,
-                    pointsForLeaderboard: filteredPoints
+                    pointsForLeaderboard: filteredPoints,
+                    // الجنيهات في "الكل" بتفضل على الرصيد الحقيقي اللي يقدر يصرفه
+                    ...(leaderboardFilter === 'all' ? { moneyBasePoints: student.points || 0 } : {}),
                 };
             })
             .sort((a, b) => b.pointsForLeaderboard - a.pointsForLeaderboard);
@@ -2716,6 +2604,7 @@ const App = () => {
             (std.attendanceHistory || []).forEach(record => {
                 if (!record.date) return;
                 if (!isFridayDateKey(record.date)) return;
+                if (!isActivityRecord(record)) return; // المكافآت ومشتريات الهدايا مش جزء من الاجتماع
 
                 if (!stats[record.date]) {
                     stats[record.date] = {
@@ -2742,23 +2631,497 @@ const App = () => {
         return Object.values(stats).sort((a, b) => b.date.localeCompare(a.date));
     }, [students]);
 
+    // ===== الافتقاد =====
+    // كل خادم ليه "مجموعة" ثابتة من الأولاد (مينا بيوزّعها بالصف). كل أسبوع، الخادم بيشوف
+    // اللي غابوا من مجموعته في آخر اجتماع ويفتقدهم من الموقع، ومينا بيشوف تقرير بكل خادم.
+    const FOLLOWUP_DOC_REF = () => doc(db, 'appData', 'followup_v1');
+    useEffect(() => {
+        const unsub = onSnapshot(FOLLOWUP_DOC_REF(), (snap) => {
+            const data: any = snap.exists() ? snap.data() : {};
+            setFollowup({
+                assignments: (data && typeof data.assignments === 'object' && data.assignments) || {},
+                contacts: (data && typeof data.contacts === 'object' && data.contacts) || {},
+            });
+        }, (err) => console.error('Follow-up listener error:', err));
+        return () => unsub();
+    }, []);
+    const FOLLOWUP_HISTORY_REF = () => doc(db, 'appData', 'followup_history_v1');
+    useEffect(() => {
+        const unsub = onSnapshot(FOLLOWUP_HISTORY_REF(), (snap) => {
+            const data: any = snap.exists() ? snap.data() : {};
+            setFollowupHistory((data && typeof data.byMeeting === 'object' && data.byMeeting) || {});
+        }, (err) => console.error('Follow-up history listener error:', err));
+        return () => unsub();
+    }, []);
+
+    // الاجتماعات اللي حصلت فعلًا (أي جمعة اتسجل فيها حضور)، من الأحدث للأقدم
+    const followupMeetings = useMemo(() => {
+        const today = getCairoDateKey();
+        return meetingsStats
+            .filter(m => m.uniqueAttendees && m.uniqueAttendees.size > 0 && m.date <= today)
+            .map(m => ({ date: m.date, attendees: m.uniqueAttendees }));
+    }, [meetingsStats]);
+    const latestMeetingDate = followupMeetings[0]?.date || '';
+
+    // لكل ولد: غايب كام اجتماع ورا بعض لحد آخر اجتماع، وآخر مرة حضر إمتى
+    const followupInfo = useMemo(() => {
+        const map: Record<string, { streak: number; lastAttendedDate: string; missedAll: boolean }> = {};
+        students.forEach(s => {
+            let streak = 0;
+            for (const m of followupMeetings) {
+                if (m.attendees.has(s.id)) break;
+                streak++;
+            }
+            const lastAttendedDate = (s.attendanceHistory || [])
+                .filter(h => ['early', 'late', 'monthlyMass'].includes(h.type) && h.date)
+                .map(h => h.date).sort().pop() || '';
+            map[s.id] = { streak, lastAttendedDate, missedAll: followupMeetings.length > 0 && streak === followupMeetings.length };
+        });
+        return map;
+    }, [students, followupMeetings]);
+
+    const followupGrades = useMemo(() => {
+        const order = ['أولى ثانوي', 'تانية ثانوي', 'تالتة ثانوي'];
+        const found: string[] = [...new Set<string>(students.map(s => String(s.grade || '').trim()).filter(Boolean))];
+        return found.sort((a, b) => {
+            const ia = order.indexOf(a), ib = order.indexOf(b);
+            return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib) || a.localeCompare(b, 'ar');
+        });
+    }, [students]);
+
+    const assignedServantId = (studentId) => {
+        const id = followup.assignments?.[studentId];
+        return id && admins.some(a => a.id === id) ? id : '';
+    };
+    const isAbsentNow = (studentId) => (followupInfo[studentId]?.streak || 0) >= 1;
+    const isFollowupContacted = (studentId) => {
+        const c = followup.contacts?.[studentId];
+        return Boolean(c && c.date && latestMeetingDate && c.date >= latestMeetingDate);
+    };
+    const byAbsence = (a, b) => (followupInfo[b.id]?.streak || 0) - (followupInfo[a.id]?.streak || 0) || String(a.name).localeCompare(String(b.name), 'ar');
+
+    const myFollowupGroup = useMemo(() => students.filter(s => loggedInAdmin && assignedServantId(s.id) === loggedInAdmin.id), [students, followup, admins, loggedInAdmin]);
+    const myFollowupAbsent = useMemo(() => myFollowupGroup.filter(s => isAbsentNow(s.id)).sort(byAbsence), [myFollowupGroup, followupInfo]);
+    const myPendingFollowupCount = myFollowupAbsent.filter(s => !isFollowupContacted(s.id)).length;
+
+    // تقرير مينا: لكل خادم، مجموعته، والغايبين منها، وافتقد كام، وآخر مرة استخدم الافتقاد
+    const followupReport = useMemo(() => {
+        return admins.map(a => {
+            const group = students.filter(s => assignedServantId(s.id) === a.id);
+            const absent = group.filter(s => isAbsentNow(s.id)).sort(byAbsence);
+            const done = absent.filter(s => isFollowupContacted(s.id));
+            const lastActivity = Object.values(followup.contacts || {})
+                .filter((c: any) => c && c.byId === a.id && c.at)
+                .map((c: any) => c.at).sort().pop() || '';
+            return { admin: a, group, absent, done, lastActivity };
+        }).filter(r => r.group.length > 0)
+            .sort((x, y) => (x.absent.length ? x.done.length / x.absent.length : 1) - (y.absent.length ? y.done.length / y.absent.length : 1));
+    }, [admins, students, followup, followupInfo, latestMeetingDate]);
+    // ===== المتابعة (أمين الفصل / المساعدين / الأمين العام) =====
+    const myScope = isFollowupOnlyAdmin(loggedInAdmin) ? '' : oversightScopeOf(loggedInAdmin);
+    const canOversee = !!myScope;
+    const scopeCoversGrade = (g) => myScope === 'all' || (!!myScope && String(g || '').trim() === myScope);
+    const scopeCoversStudent = (s) => !!s && scopeCoversGrade(s.grade);
+    // أمين الفصل: التوزيع دايمًا على صفّه
+    useEffect(() => {
+        if (myScope && myScope !== 'all' && followupGrade !== myScope) setFollowupGrade(myScope);
+    }, [myScope, followupGrade]);
+
+    // ===== الملاحظات =====
+    const NOTES_DOC_REF = () => doc(db, 'appData', 'notes_v1');
+    useEffect(() => {
+        const unsub = onSnapshot(NOTES_DOC_REF(), (snap) => {
+            const data: any = snap.exists() ? snap.data() : {};
+            setNotesData((data && typeof data.notes === 'object' && data.notes) || {});
+        }, (err) => console.error('Notes listener error:', err));
+        return () => unsub();
+    }, []);
+    // مين يشوف كل ملاحظات الولد: خادمه + أمين صفّه + المساعدين + الأمين العام. غيرهم يشوف ملاحظاته هو بس.
+    const canSeeAllNotesOf = (s) => !!loggedInAdmin && !!s && (scopeCoversStudent(s) || assignedServantId(s.id) === loggedInAdmin.id);
+    const allNotesOf = (studentId) => Object.entries(notesData[studentId] || {})
+        .map(([id, n]: [string, any]) => ({ id, ...(n || {}) }))
+        .filter((n: any) => n && n.text)
+        .sort((a: any, b: any) => String(b.at || '').localeCompare(String(a.at || '')));
+    const visibleNotesOf = (s) => {
+        if (!s || !loggedInAdmin) return [];
+        const list = allNotesOf(s.id);
+        return canSeeAllNotesOf(s) ? list : list.filter((n: any) => n.byId === loggedInAdmin.id);
+    };
+    const addNote = (studentId, text) => {
+        const clean = String(text || '').trim().slice(0, 1000);
+        if (!loggedInAdmin || !clean) return Promise.resolve(false);
+        const noteId = `n_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        return setDoc(NOTES_DOC_REF(), {
+            notes: { [studentId]: { [noteId]: { text: clean, by: loggedInAdmin.name, byId: loggedInAdmin.id, at: new Date().toISOString(), date: getCairoDateKey() } } },
+        }, { merge: true }).then(() => true).catch(err => { console.error(err); showToast('⚠️ فشل حفظ الملاحظة، جرّب تاني.'); return false; });
+    };
+    const deleteNote = (studentId, note) => {
+        if (!loggedInAdmin || !(loggedInAdmin.isSuperAdmin || note.byId === loggedInAdmin.id)) return;
+        if (!window.confirm('تمسح الملاحظة دي؟')) return;
+        setDoc(NOTES_DOC_REF(), { notes: { [studentId]: { [note.id]: deleteField() } } }, { merge: true })
+            .then(() => showToast('اتمسحت الملاحظة.'))
+            .catch(err => { console.error(err); showToast('⚠️ فشل المسح، جرّب تاني.'); });
+    };
+    const notesDocKB = useMemo(() => Math.round(JSON.stringify(notesData || {}).length / 1024), [notesData]);
+
+    // ===== ولاد بيبعدوا: غايبين 3 اجتماعات ورا بعض أو أكتر، وكانوا بيحضروا قبل كده =====
+    const AT_RISK_STREAK = 3;
+    const atRiskStudents = useMemo(() => students
+        .filter(s => (followupInfo[s.id]?.streak || 0) >= AT_RISK_STREAK && followupInfo[s.id]?.lastAttendedDate)
+        .sort((a, b) => (followupInfo[b.id]?.streak || 0) - (followupInfo[a.id]?.streak || 0) || String(a.name).localeCompare(String(b.name), 'ar')),
+        [students, followupInfo]);
+    const neverCameStudents = useMemo(() => followupMeetings.length >= AT_RISK_STREAK
+        ? students.filter(s => !followupInfo[s.id]?.lastAttendedDate) : [], [students, followupInfo, followupMeetings]);
+    const isAtRisk = (studentId) => (followupInfo[studentId]?.streak || 0) >= AT_RISK_STREAK && !!followupInfo[studentId]?.lastAttendedDate;
+
+    // نقط النشاط لكل ولد في يوم أو شهر معيّن (من غير المكافآت والهدايا)
+    const activityPointsIn = (s, prefix) => (s.attendanceHistory || [])
+        .filter(h => h.date && h.date.startsWith(prefix) && isActivityRecord(h))
+        .reduce((n, h) => n + Number(h.points || 0), 0);
+    const firstAttendanceDate = (s) => (s.attendanceHistory || [])
+        .filter(h => ['early', 'late', 'monthlyMass'].includes(h.type) && h.date).map(h => h.date).sort()[0] || '';
+
+    // ===== ملخص الجمعة =====
+    const buildFridaySummary = (meetingDate, inScope) => {
+        const idx = followupMeetings.findIndex(m => m.date === meetingDate);
+        if (idx === -1) return null;
+        const m = followupMeetings[idx];
+        const prev = followupMeetings[idx + 1];
+        const scoped = students.filter(inScope);
+        const present = scoped.filter(s => m.attendees.has(s.id));
+        const prevCount = prev ? scoped.filter(s => prev.attendees.has(s.id)).length : null;
+        const byGrade = followupGrades.map(g => ({ g, n: present.filter(s => String(s.grade || '').trim() === g).length, total: scoped.filter(s => String(s.grade || '').trim() === g).length })).filter(x => x.total > 0);
+        const newKids = present.filter(s => firstAttendanceDate(s) === meetingDate);
+        const returned = present.filter(s => {
+            if (newKids.includes(s)) return false;
+            let missed = 0;
+            for (let i = idx + 1; i < followupMeetings.length; i++) { if (followupMeetings[i].attendees.has(s.id)) break; missed++; }
+            return missed >= 2;
+        });
+        const top = present.map(s => ({ s, p: activityPointsIn(s, meetingDate) })).filter(x => x.p > 0).sort((a, b) => b.p - a.p).slice(0, 3);
+        // الافتقاد اللي اتعمل على غياب الاجتماع اللي قبله
+        let fuDone = 0, fuTotal = 0;
+        if (prev) {
+            scoped.filter(s => !prev.attendees.has(s.id) && assignedServantId(s.id)).forEach(s => {
+                fuTotal++;
+                if (wasContactedForMeeting(prev.date, s.id)) fuDone++;
+            });
+        }
+        const atRiskN = idx === 0 ? atRiskStudents.filter(inScope).length : null;
+        return { m, prev, present, prevCount, byGrade, newKids, returned, top, fuDone, fuTotal, atRiskN, isMass: isFirstFridayDateKey(meetingDate) };
+    };
+    const fridaySummaryText = (sum, scopeLabel) => {
+        if (!sum) return '';
+        const d = formatCairoDateKeyAr(sum.m.date, { weekday: 'long', day: 'numeric', month: 'long' });
+        const diff = sum.prevCount === null ? '' : sum.present.length - sum.prevCount;
+        const lines = [
+            `📋 ملخص ${sum.isMass ? 'القداس الشهري' : 'اجتماع'} ${d}${scopeLabel ? ` — ${scopeLabel}` : ''}`,
+            `اجتماع تي بارثينوس - شابات ثانوي`,
+            ``,
+            `👥 الحضور: ${sum.present.length}${diff === '' ? '' : diff > 0 ? ` (⬆️ ${diff} عن اللي قبله)` : diff < 0 ? ` (⬇️ ${Math.abs(Number(diff))} عن اللي قبله)` : ' (زي اللي قبله)'}`,
+            ...(sum.byGrade.length > 1 ? [sum.byGrade.map(x => `• ${x.g}: ${x.n} من ${x.total}`).join('\n')] : []),
+            ...(sum.newKids.length ? [``, `🆕 أول مرة ييجوا (${sum.newKids.length}): ${sum.newKids.map(s => s.name).join('، ')}`] : []),
+            ...(sum.returned.length ? [``, `🔙 رجعوا بعد غياب (${sum.returned.length}): ${sum.returned.map(s => s.name).join('، ')}`] : []),
+            ...(sum.top.length ? [``, `🏆 أعلى نقط: ${sum.top.map(x => `${x.s.name} (${x.p})`).join('، ')}`] : []),
+            ...(sum.prev && sum.fuTotal ? [``, `📞 افتقاد غياب الاجتماع اللي قبله: ${sum.fuDone} من ${sum.fuTotal}`] : []),
+            ...(sum.atRiskN ? [`⚠️ بنات غايبين ${AT_RISK_STREAK} اجتماعات أو أكتر: ${sum.atRiskN}`] : []),
+        ];
+        return lines.join('\n');
+    };
+
+    // ===== التقرير الشهري =====
+    const reportMonths = useMemo(() => [...new Set(followupMeetings.map(m => m.date.slice(0, 7)))].sort().reverse(), [followupMeetings]);
+    const buildMonthReport = (prefix, inScope) => {
+        const scoped = students.filter(inScope);
+        const meetings = followupMeetings.filter(m => m.date.startsWith(prefix)).slice().reverse();
+        const attendedCount = (s) => meetings.filter(m => m.attendees.has(s.id)).length;
+        const perMeeting = meetings.map(m => ({
+            date: m.date,
+            isMass: isFirstFridayDateKey(m.date),
+            total: scoped.filter(s => m.attendees.has(s.id)).length,
+            byGrade: followupGrades.map(g => scoped.filter(s => String(s.grade || '').trim() === g && m.attendees.has(s.id)).length),
+        }));
+        const grades = followupGrades.map(g => {
+            const kids = scoped.filter(s => String(s.grade || '').trim() === g);
+            const avg = meetings.length ? kids.reduce((n, s) => n + attendedCount(s), 0) / meetings.length : 0;
+            return { g, total: kids.length, avg, pct: kids.length ? Math.round((avg / kids.length) * 100) : 0 };
+        }).filter(x => x.total > 0);
+        const totalAvg = meetings.length ? scoped.reduce((n, s) => n + attendedCount(s), 0) / meetings.length : 0;
+        const massKids = scoped.filter(s => (s.attendanceHistory || []).some(h => h.type === 'monthlyMass' && h.date && h.date.startsWith(prefix)));
+        const confessions = scoped.filter(s => (s.attendanceHistory || []).some(h => h.type === 'confession' && h.date && h.date.startsWith(prefix))).length;
+        const newKids = scoped.filter(s => firstAttendanceDate(s).startsWith(prefix));
+        const committed = scoped.map(s => ({ s, n: attendedCount(s), p: activityPointsIn(s, prefix) }))
+            .filter(x => x.n > 0).sort((a, b) => b.n - a.n || b.p - a.p).slice(0, 10);
+        const servants = admins.map(a => {
+            const group = scoped.filter(s => assignedServantId(s.id) === a.id);
+            if (!group.length) return null;
+            let absent = 0, done = 0, replied = 0, quick = 0;
+            meetings.forEach(m => group.forEach(s => {
+                if (m.attendees.has(s.id)) return;
+                absent++;
+                const c = contactForMeeting(m.date, s.id);
+                if (c) { done++; if (isRepliedOutcome(c.outcome)) replied++; if (c.quick) quick++; }
+            }));
+            const notesN = group.reduce((n, s) => n + allNotesOf(s.id).filter((x: any) => x.byId === a.id && String(x.date || x.at || '').startsWith(prefix)).length, 0);
+            return { a, size: group.length, absent, done, replied, quick, pct: absent ? Math.round((done / absent) * 100) : 100, notesN };
+        }).filter(Boolean).sort((x: any, y: any) => y.pct - x.pct);
+        const trackingStart = Object.keys(followupHistory || {}).sort()[0] || latestMeetingDate || '';
+        return { prefix, scoped, meetings, perMeeting, grades, totalAvg, massKids, confessions, newKids, committed, servants, atRisk: atRiskStudents.filter(inScope), never: neverCameStudents.filter(inScope), trackingStart };
+    };
+    // وإحنا بنطبع التقرير، باقي الموقع بيستخبى
+    useEffect(() => {
+        document.body.classList.toggle('month-report-open', monthReportOpen);
+        return () => document.body.classList.remove('month-report-open');
+    }, [monthReportOpen]);
+
+    const unassignedAbsentCount = students.filter(s => !assignedServantId(s.id) && isAbsentNow(s.id)).length;
+    const unassignedCount = students.filter(s => !assignedServantId(s.id)).length;
+
+    const recordFollowupContact = (studentId, method, extra: any = {}) => {
+        if (!loggedInAdmin) return;
+        const entry = { date: getCairoDateKey(), by: loggedInAdmin.name, byId: loggedInAdmin.id, method, at: new Date().toISOString(), ...extra };
+        setDoc(FOLLOWUP_DOC_REF(), {
+            contacts: { [studentId]: entry },
+        }, { merge: true }).catch(err => { console.error(err); showToast('⚠️ فشل الحفظ، جرّب تاني.'); });
+        // نسخة في سجل الاجتماع ده (مابتتمسحش لما ييجي اجتماع جديد)
+        if (latestMeetingDate) {
+            setDoc(FOLLOWUP_HISTORY_REF(), { byMeeting: { [latestMeetingDate]: { [studentId]: { byId: entry.byId, method, at: entry.at, ...(entry.outcome ? { outcome: entry.outcome } : {}), ...(entry.quick ? { quick: true } : {}) } } } }, { merge: true })
+                .catch(err => console.error('Follow-up history save error:', err));
+        }
+    };
+    // اتافتقد بعد اجتماع معيّن؟ (آخر اجتماع من العلامات الحالية، والقديم من السجل)
+    const wasContactedForMeeting = (meetingDate, studentId) => {
+        if (meetingDate === latestMeetingDate) return isFollowupContacted(studentId);
+        return Boolean(followupHistory?.[meetingDate]?.[studentId]);
+    };
+    const contactForMeeting = (meetingDate, studentId) => {
+        if (meetingDate === latestMeetingDate) return isFollowupContacted(studentId) ? followup.contacts?.[studentId] : null;
+        return followupHistory?.[meetingDate]?.[studentId] || null;
+    };
+
+    // ===== نتيجة الافتقاد =====
+    const savePendingContact = (p) => {
+        setPendingContact(p);
+        try { if (p) appStorage.setItem('pending_followup_contact', JSON.stringify(p)); else appStorage.removeItem('pending_followup_contact'); } catch (e) {}
+    };
+    // الخادم داس واتساب أو اتصال: لسه ماتحسبش، بنستنى يرجع
+    const startFollowupContact = (studentId, method) => {
+        if (!loggedInAdmin) return;
+        hiddenAtRef.current = 0;
+        savePendingContact({ studentId, method, startedAt: Date.now(), byId: loggedInAdmin.id });
+    };
+    const openOutcome = (p, awayMs = null) => { setOutcomeNote(''); setOutcomeModal({ ...p, awayMs }); };
+    useEffect(() => {
+        const onVis = () => {
+            if (document.hidden) { hiddenAtRef.current = Date.now(); return; }
+            if (!pendingContact || outcomeModal || !loggedInAdmin || pendingContact.byId !== loggedInAdmin.id) return;
+            if (!hiddenAtRef.current) return; // لسه ماخرجش من الموقع
+            const away = Date.now() - hiddenAtRef.current;
+            hiddenAtRef.current = 0;
+            openOutcome(pendingContact, away);
+        };
+        document.addEventListener('visibilitychange', onVis);
+        return () => document.removeEventListener('visibilitychange', onVis);
+    }, [pendingContact, outcomeModal, loggedInAdmin]);
+    // لو الموقع اتقفل واتفتح تاني وهو لسه ماقالش حصل إيه
+    useEffect(() => {
+        if (!pendingContact || outcomeModal || !loggedInAdmin || pendingContact.byId !== loggedInAdmin.id) return;
+        if (Date.now() - Number(pendingContact.startedAt || 0) > 4000 && !document.hidden && !hiddenAtRef.current) {
+            openOutcome(pendingContact, Date.now() - Number(pendingContact.startedAt || 0));
+        }
+    }, [loggedInAdmin]);
+    const FOLLOWUP_OUTCOMES = {
+        replied: { icon: '💬', label: 'رد عليا', short: 'رد' },
+        no_reply: { icon: '✉️', label: 'بعتّله ومردش لسه', short: 'مردش' },
+        no_answer: { icon: '📵', label: 'مردش على المكالمة', short: 'مردش' },
+        met: { icon: '🤝', label: 'قابلته أو كلمته بطريقة تانية', short: 'قابله' },
+        unreachable: { icon: '❌', label: 'معرفتش أوصله', short: 'ماوصلوش' },
+    };
+    const OUTCOMES_BY_METHOD = { whatsapp: ['replied', 'no_reply', 'unreachable'], call: ['replied', 'no_answer', 'unreachable'], manual: ['met', 'replied', 'unreachable'] };
+    const isRepliedOutcome = (o) => o === 'replied' || o === 'met';
+    const QUICK_MS = 5000;
+    const finishFollowupContact = (outcome) => {
+        if (!outcomeModal) return;
+        const note = outcomeNote.trim();
+        if (outcome === 'unreachable' && !note) { showToast('اكتب في سطر ليه معرفتش توصله.'); return; }
+        const quick = outcomeModal.method !== 'manual' && outcomeModal.awayMs !== null && outcomeModal.awayMs < QUICK_MS;
+        recordFollowupContact(outcomeModal.studentId, outcomeModal.method, {
+            outcome, ...(quick ? { quick: true } : {}),
+            ...(outcomeModal.awayMs !== null ? { awaySec: Math.round(outcomeModal.awayMs / 1000) } : {}),
+        });
+        if (note) addNote(outcomeModal.studentId, `${FOLLOWUP_OUTCOMES[outcome].icon} ${FOLLOWUP_OUTCOMES[outcome].label}: ${note}`);
+        savePendingContact(null);
+        setOutcomeModal(null);
+        setOutcomeNote('');
+        showToast('✅ اتسجل الافتقاد.');
+    };
+    const cancelFollowupContact = () => {
+        savePendingContact(null);
+        setOutcomeModal(null);
+        setOutcomeNote('');
+        showToast('ماتسجلش افتقاد.');
+    };
+    const toggleFollowupContacted = (studentId) => {
+        if (!loggedInAdmin) return;
+        if (isFollowupContacted(studentId)) {
+            if (latestMeetingDate) {
+                setDoc(FOLLOWUP_HISTORY_REF(), { byMeeting: { [latestMeetingDate]: { [studentId]: deleteField() } } }, { merge: true })
+                    .catch(err => console.error('Follow-up history delete error:', err));
+            }
+            setDoc(FOLLOWUP_DOC_REF(), { contacts: { [studentId]: deleteField() } }, { merge: true })
+                .then(() => showToast('اتشالت علامة الافتقاد.'))
+                .catch(err => { console.error(err); showToast('⚠️ فشل الحفظ، جرّب تاني.'); });
+        } else {
+            openOutcome({ studentId, method: 'manual', startedAt: Date.now(), byId: loggedInAdmin.id }, null);
+        }
+    };
+    const assignFollowup = (studentId, adminId) => {
+        if (!scopeCoversStudent(students.find(s => s.id === studentId))) return;
+        setDoc(FOLLOWUP_DOC_REF(), { assignments: { [studentId]: adminId ? adminId : deleteField() } }, { merge: true })
+            .catch(err => { console.error(err); showToast('⚠️ فشل حفظ التوزيع، جرّب تاني.'); });
+    };
+
+    // توزيع مجموعات صف كامل على خدام بيختارهم مينا، بالتساوي، وكل خادم بياخد خليط
+    // (اللي بيحضروا، واللي بيغيبوا شوية، واللي بيغيبوا كتير)
+    const openGroupDistribution = (reassignAll) => {
+        if (!scopeCoversGrade(followupGrade)) return;
+        const gradeStudents = students.filter(s => String(s.grade || '').trim() === followupGrade);
+        const used = [...new Set(gradeStudents.map(s => assignedServantId(s.id)).filter(Boolean))] as string[];
+        setFollowupReassignAll(Boolean(reassignAll));
+        setFollowupAssignServants(used);
+        setFollowupAssignPickerOpen(true);
+    };
+
+    const runGroupDistribution = () => {
+        if (!scopeCoversGrade(followupGrade)) return;
+        const servants = admins.filter(a => followupAssignServants.includes(a.id));
+        if (servants.length === 0) { showToast('اختار خادم واحد على الأقل.'); return; }
+        const gradeStudents = students.filter(s => String(s.grade || '').trim() === followupGrade);
+        const toAssign = gradeStudents.filter(s => followupReassignAll || !assignedServantId(s.id)).sort(byAbsence);
+        if (toAssign.length === 0) { showToast('كل بنات الصف ده ليهم خدام بالفعل.'); return; }
+        if (followupReassignAll && !window.confirm(`هيتعاد توزيع كل بنات ${followupGrade} (${toAssign.length} بنت) على: ${servants.map(a => a.name).join('، ')}.\n\nالمجموعات القديمة للصف ده هتتغير. تكمل؟`)) return;
+        const load = Object.fromEntries(servants.map(a => [a.id, followupReassignAll ? 0 : gradeStudents.filter(s => assignedServantId(s.id) === a.id).length]));
+        const updates: Record<string, any> = {};
+        if (followupReassignAll) gradeStudents.forEach(s => { updates[s.id] = deleteField(); });
+        let turn = 0;
+        toAssign.forEach(s => {
+            const order = servants.slice(turn).concat(servants.slice(0, turn));
+            const pick = order.reduce((best, a) => (load[a.id] < load[best.id] ? a : best), order[0]);
+            updates[s.id] = pick.id;
+            load[pick.id]++;
+            turn = (turn + 1) % servants.length;
+        });
+        setDoc(FOLLOWUP_DOC_REF(), { assignments: updates }, { merge: true })
+            .then(() => { showToast(`✅ اتوزع ${toAssign.length} بنت من ${followupGrade} على ${servants.map(a => a.name).join('، ')}.`); setFollowupAssignPickerOpen(false); })
+            .catch(err => { console.error(err); showToast('⚠️ فشل التوزيع، جرّب تاني.'); });
+    };
+
+    // ===== بداية سنة جديدة (للسوبر أدمن بس) =====
+    const handleStartNewSeason = () => {
+        if (!loggedInAdmin?.isSuperAdmin) return;
+        const totalNow = students.reduce((n, s) => n + Math.max(0, Number(s.points) || 0), 0);
+        const ok = window.confirm(
+            `🔄 بداية سنة جديدة\n\n` +
+            `اللي هيحصل:\n` +
+            `• نقط السنة دي لكل بنت (${totalNow} نقطة لكل البنات) هتتنقل لـ"نقاط السنين السابقة"\n` +
+            `• نقط السنة دي هتبقى صفر\n` +
+            `• سجل الحضور والنقط هيتمسح عشان السنة الجديدة تبدأ نضيفة\n\n` +
+            `⚠️ اتأكد إنك صرفت مكافآت أوائل الشهر اللي فات الأول.\n\n` +
+            `هتتحمّل نسخة احتياطية كاملة على جهازك قبل أي حاجة. تكمل؟`
+        );
+        if (!ok) return;
+        handleExportData();
+        const typed = window.prompt('للتأكيد النهائي اكتب: سنة جديدة');
+        if ((typed || '').trim() !== 'سنة جديدة') {
+            showToast('اتلغى، ومحدش اتغير.');
+            return;
+        }
+        const updated = students.map(s => {
+            const { moneyOffset, customMoney, ...rest } = s;
+            return {
+                ...rest,
+                previousYearsPoints: (Number(s.previousYearsPoints) || 0) + Math.max(0, Number(s.points) || 0),
+                points: 0,
+                attendanceHistory: [],
+            };
+        });
+        saveStudentsData(updated);
+        setAdminManagementModalOpen(false);
+        showToast('🎉 بدأت سنة جديدة! النقط اتنقلت للسنين السابقة.');
+    };
+
+    // ===== تصدير سجل الحضور لملف Excel (للخدام والأدمنز) =====
+    const ATTENDANCE_TYPES = ['early', 'late', 'monthlyMass'];
+    const recordLabel = (h) => h?.typeName || h?.type || '';
+    const exportMeetingToExcel = (dateKey) => {
+        const sortAr = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ar');
+        const attended = students.filter(s => (s.attendanceHistory || []).some(h => h.date === dateKey && ATTENDANCE_TYPES.includes(h.type))).sort(sortAr);
+        const attendedIds = new Set(attended.map(s => s.id));
+        const absent = students.filter(s => !attendedIds.has(s.id)).sort(sortAr);
+        const presentRows = [['م', 'الاسم', 'المرحلة الدراسية', 'رقم الموبايل', 'نوع الحضور', 'نقاط اليوم', 'التفاصيل']];
+        attended.forEach((s, idx) => {
+            const recs = (s.attendanceHistory || []).filter(h => h.date === dateKey);
+            const att = recs.find(h => ATTENDANCE_TYPES.includes(h.type));
+            presentRows.push([
+                idx + 1, s.name || '', s.grade || '', s.phone || '', att ? recordLabel(att) : '',
+                recs.filter(isActivityRecord).reduce((n, h) => n + Number(h.points || 0), 0),
+                recs.map(h => `${recordLabel(h)} (${Number(h.points) > 0 ? '+' : ''}${Number(h.points || 0)})${h.description ? ' - ' + h.description : ''}`).join(' | '),
+            ]);
+        });
+        const absentRows = [['م', 'الاسم', 'المرحلة الدراسية', 'رقم الموبايل']];
+        absent.forEach((s, idx) => absentRows.push([idx + 1, s.name || '', s.grade || '', s.phone || '']));
+        downloadBlob(buildXlsx([
+            { name: `الحضور (${attended.length})`, rows: presentRows, widths: [5, 28, 16, 15, 16, 11, 60] },
+            { name: `الغياب (${absent.length})`, rows: absentRows, widths: [5, 28, 16, 15] },
+        ]), `حضور_${dateKey}.xlsx`);
+        showToast('📥 تم تحميل ملف Excel');
+    };
+    const exportAllMeetingsToExcel = () => {
+        const dates = meetingsStats.map(m => m.date).sort();
+        const sortAr = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ar');
+        const sorted = [...students].sort(sortAr);
+        const summary = [['م', 'الاسم', 'المرحلة الدراسية', 'رقم الموبايل', ...dates, 'عدد مرات الحضور', 'نقاط السنة دي', 'نقاط السنين السابقة', 'المجموع الكلي']];
+        sorted.forEach((s, idx) => {
+            const hist = s.attendanceHistory || [];
+            const marks = dates.map(d => hist.some(h => h.date === d && ATTENDANCE_TYPES.includes(h.type)) ? '✓' : '');
+            summary.push([idx + 1, s.name || '', s.grade || '', s.phone || '', ...marks,
+                marks.filter(Boolean).length, Number(s.points || 0), Number(s.previousYearsPoints || 0), getStudentTotalPoints(s)]);
+        });
+        const details = [['التاريخ', 'الاسم', 'المرحلة الدراسية', 'النوع', 'النقاط', 'التفاصيل', 'سجّله']];
+        sorted.forEach(s => (s.attendanceHistory || []).forEach(h => {
+            details.push([h.date || '', s.name || '', s.grade || '', recordLabel(h), Number(h.points || 0), h.description || '', h.recordedBy || '']);
+        }));
+        details.splice(1, details.length - 1, ...details.slice(1).sort((a, b) => String(b[0]).localeCompare(String(a[0])) || String(a[1]).localeCompare(String(b[1]), 'ar')));
+        downloadBlob(buildXlsx([
+            { name: 'ملخص الحضور', rows: summary, widths: [5, 28, 16, 15, ...dates.map(() => 12), 14, 13, 16, 13] },
+            { name: 'كل السجلات', rows: details, widths: [12, 28, 16, 22, 9, 40, 16] },
+        ]), `سجل_الحضور_${getCairoDateKey()}.xlsx`);
+        showToast('📥 تم تحميل ملف Excel');
+    };
+
     const { superAdmin, otherAdmins } = useMemo(() => {
         const superAdmin = admins.find(a => a.isSuperAdmin);
         const otherAdmins = admins.filter(a => !a.isSuperAdmin);
         return { superAdmin, otherAdmins };
     }, [admins]);
 
-    const isAuthenticated = !!loggedInAdmin;
+    // isAuthenticated = خادم كامل الصلاحيات (خادم الافتقاد بس بيتعامل كأنه زائر في باقي الموقع)
+    const isAuthenticated = !!loggedInAdmin && !isFollowupOnlyAdmin(loggedInAdmin);
     const isSuperAdmin = loggedInAdmin?.isSuperAdmin;
-    // نسخة البنات: الصلاحيات الخاصة (متجر الهدايا، التحكم في النقاط، الأوسمة) للسوبر أدمن بس،
-    // مش لأي خادم اسمه فيه "مينا".
-    const isMinaAdmin = useMemo(() => Boolean(loggedInAdmin?.isSuperAdmin), [loggedInAdmin]);
+    // صلاحيات "مينا" (المتجر، تعديل نقط السنين اللي فاتت، تنبيهات الأوسمة) للسوبر أدمن بس.
+    // (قبل كده كانت بتتحدد من الاسم، فأي خادم اسمه فيه "مينا" زي "مينا معوض" كان بياخدها بالغلط.)
+    const isMinaAdmin = useMemo(() => Boolean(loggedInAdmin && loggedInAdmin.isSuperAdmin), [loggedInAdmin]);
 
     // بث حالة دخول مينا لملف الهدايا (GiftsShop.tsx) المستقل - إضافة فقط، مش بتغيّر أي منطق موجود
     useEffect(() => {
         window.__isMinaAdmin = isMinaAdmin;
         window.dispatchEvent(new CustomEvent('mina-admin-status', { detail: isMinaAdmin }));
     }, [isMinaAdmin]);
+    // أي خادم داخل: زرار الهدايا العايم (بتاع الأولاد) يستخبى عشان مايغطيش على الشاشة
+    useEffect(() => {
+        (window as any).__isServantLoggedIn = Boolean(loggedInAdmin);
+        window.dispatchEvent(new CustomEvent('servant-login-status', { detail: Boolean(loggedInAdmin) }));
+    }, [loggedInAdmin]);
 
     const [giftsPendingCount, setGiftsPendingCount] = useState(0);
     useEffect(() => {
@@ -2789,7 +3152,7 @@ const App = () => {
             return;
         }
         if (!rewardStudentId) {
-            showToast('الرجاء اختيار الشاب المستحق للمكافأة.');
+            showToast('الرجاء اختيار الشابة المستحقة للمكافأة.');
             return;
         }
         const pts = parseInt(rewardPoints, 10);
@@ -2804,6 +3167,11 @@ const App = () => {
 
         const targetStd = students.find(s => s.id === rewardStudentId);
         if (!targetStd) return;
+        const rewardMonthPrefix = rewardTargetMonth === 'prev' ? getCairoMonthPrefixOffset(-1) : getCairoMonthPrefix();
+        if ((targetStd.attendanceHistory || []).some(h => typeof h.meta === 'string' && h.meta.startsWith(`leaderboard_reward_${rewardMonthPrefix}_rank_`))) {
+            showToast(`⚠️ ${targetStd.name} خد مكافأة ترتيب الشهر ده قبل كده.`);
+            return;
+        }
 
         const newRecord = {
             id: generateId(),
@@ -2887,7 +3255,11 @@ const App = () => {
         showToast(`🎉 تم منح مكافأة الأوسمة (+${pts} نقطة) لـ ${badgeRewardStudent.name} بنجاح!`);
     };
 
-    const openPointsEditModal = (student) => {
+    const openPointsEditModal = (studentFromView) => {
+        // خد بيانات الولد الأصلية (مش النسخة المعروضة في لوحة الصدارة اللي فيها نقط الشهر بس)،
+        // عشان الجنيهات تتحسب على الرصيد الحقيقي ومايتعملش تعديل جنيهات بالغلط
+        const { pointsForLeaderboard, moneyBasePoints, ...rest } = studentFromView || {};
+        const student = students.find(s => s.id === rest.id) || rest;
         setStudentForPointsEdit(student);
         const currentPts = student.points ?? 0;
         setTargetPointsInput(String(currentPts));
@@ -2904,6 +3276,7 @@ const App = () => {
 
     const handleSavePointsEdit = () => {
         if (!studentForPointsEdit) return;
+        if (blockFollowupOnly()) return;
         
         const ptsVal = parseInt(targetPointsInput, 10);
         if (isNaN(ptsVal) || ptsVal < 0) {
@@ -2933,13 +3306,22 @@ const App = () => {
             recordedBy: loggedInAdmin.name,
         } : null;
 
+        const newPts = Math.max(0, currentPts + diff);
+        // الجنيهات اللي اتكتبت في الخانة: لو هي نفس الحساب العادي للنقط الجديدة، يبقى مفيش تعديل يدوي
+        const autoMoneyForOldPts = getBaseMoney(currentPts) + (Number(studentForPointsEdit.moneyOffset) || 0);
+        const moneyUntouched = Math.round(moneyVal) === Math.round(autoMoneyForOldPts);
+        const newOffset = moneyUntouched
+            ? (Number(studentForPointsEdit.moneyOffset) || 0)   // مالمسش الجنيهات: سيب الفرق القديم زي ما هو
+            : Math.round(moneyVal) - getBaseMoney(newPts);       // عدّلها يدوي: احفظ الفرق عن الحساب العادي
+
         const updatedList = students.map(s => {
             if (s.id === studentForPointsEdit.id) {
                 const history = s.attendanceHistory || [];
+                const { customMoney, moneyOffset, ...rest } = s;
                 return {
-                    ...s,
+                    ...rest,
                     points: Math.max(0, (s.points || 0) + diff),
-                    customMoney: moneyVal,
+                    ...(newOffset !== 0 ? { moneyOffset: newOffset } : {}),
                     attendanceHistory: newRecord ? [newRecord, ...history] : history
                 };
             }
@@ -2947,91 +3329,62 @@ const App = () => {
         });
         saveStudentsData(updatedList);
 
-        setToastMessage(`✨ تم تعديل رصيد ${studentForPointsEdit.name} إلى ${ptsVal} نقطة و (${moneyVal} جنيه) بنجاح!`);
+        setToastMessage(`✨ تم تعديل رصيد ${studentForPointsEdit.name} إلى ${ptsVal} نقطة و (${Math.max(0, getBaseMoney(newPts) + newOffset)} جنيه) بنجاح!`);
         setTimeout(() => setToastMessage(null), 4000);
         setStudentForPointsEdit(null);
     };
     
+    // تحديث التطبيق وتنظيف الكاش (بقى في صفحة الإدارة، وللزوار في الهيدر)
+    const forceRefreshApp = async () => {
+        try {
+            if ('caches' in window) {
+                const cacheNames = await caches.keys();
+                await Promise.all(cacheNames.map(name => caches.delete(name)));
+            }
+            if ('serviceWorker' in navigator) {
+                const registrations = await navigator.serviceWorker.getRegistrations();
+                await Promise.all(registrations.map(registration => registration.unregister()));
+            }
+            appStorage.setItem('church_attendance_app_version', APP_VERSION);
+            window.location.reload();
+        } catch (e) {
+            console.error('Manual cache cleanup failed:', e);
+            window.location.reload();
+        }
+    };
+
+    // الأقسام: الرئيسية (الأولاد/الترتيب/الاجتماعات) — الافتقاد — الإدارة
+    const HOME_VIEWS = ['students', 'leaderboard', 'attendance_summary'];
+    const isFollowupOnlyUser = !!loggedInAdmin && !isAuthenticated;
+    const currentSection = isFollowupOnlyUser ? 'followup'
+        : activeView === 'followup' ? 'followup'
+        : activeView === 'oversight' ? (canOversee ? 'oversight' : 'followup')
+        : (activeView === 'admin' || activeView === 'badge_alerts') ? 'admin'
+        : 'home';
+    const goSection = (view) => { setActiveView(view); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+    const adminAlertsCount = isSuperAdmin ? (pendingBadgesCount + giftsPendingCount) : 0;
+    const todayKey = getCairoDateKey();
+
     return (
-        <div className="text-slate-100 min-h-screen p-4 md:p-8">
+        <div className={`text-slate-100 min-h-screen p-4 md:p-8 ${isAuthenticated ? 'pb-32 md:pb-32' : ''}`}>
             <div className="max-w-4xl mx-auto">
-                <header className="flex justify-between items-center mb-6 pb-4 border-b border-indigo-800/50">
+                <header className="glass-panel flex justify-between items-center mb-5 px-4 py-3 rounded-2xl sticky top-2 z-30" style={{ top: 'max(8px, env(safe-area-inset-top, 0px))' }}>
                     <div>
-                        <h1 className="text-3xl md:text-4xl font-bold text-amber-400 tracking-wider">اجتماع تي بارثينوس</h1>
-                        <p className="text-lg text-indigo-300 mt-1">شابات ثانوي - كنيسة الشهيد العظيم مارمينا مدينة الأحلام</p>
+                        <h1 className="text-2xl md:text-4xl font-black text-white tracking-wide">اجتماع <span className="text-amber-300">تي بارثينوس</span></h1>
+                        <p className="text-sm md:text-lg text-white/60 mt-0.5">شابات ثانوي - كنيسة الشهيد العظيم مارمينا مدينة الأحلام</p>
                     </div>
                     <div className="flex items-center gap-2 md:gap-4">
-                        <button
-                            type="button"
-                            onClick={async () => {
-                                try {
-                                    if ('caches' in window) {
-                                        const cacheNames = await caches.keys();
-                                        await Promise.all(cacheNames.map(name => caches.delete(name)));
-                                    }
-                                    if ('serviceWorker' in navigator) {
-                                        const registrations = await navigator.serviceWorker.getRegistrations();
-                                        await Promise.all(registrations.map(registration => registration.unregister()));
-                                    }
-                                    appStorage.setItem('church_attendance_app_version', APP_VERSION);
-                                    window.location.reload();
-                                } catch (e) {
-                                    console.error('Manual cache cleanup failed:', e);
-                                    window.location.reload();
-                                }
-                            }}
-                            className="bg-indigo-800 hover:bg-indigo-700 text-white p-2 rounded-full transition-colors"
-                            title="تحديث التطبيق وتنظيف الكاش"
-                            aria-label="تحديث التطبيق وتنظيف الكاش"
-                        >
-                            🔄
-                        </button>
-                        {isMinaAdmin && (
-                            <button 
-                                onClick={() => setActiveView('badge_alerts')}
-                                className={`relative p-2 rounded-full transition-all flex items-center justify-center ${
-                                    activeView === 'badge_alerts'
-                                        ? 'bg-amber-500 text-indigo-950 shadow-md ring-2 ring-amber-400'
-                                        : pendingBadgesCount > 0
-                                        ? 'bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/50'
-                                        : 'bg-indigo-800 hover:bg-indigo-700 text-white'
-                                }`}
-                                title="تنبيهات واستحقاقات الأوسمة والمكافآت (خاص بالأدمن)"
-                                aria-label="تنبيهات الأوسمة"
-                            >
-                                <BellIcon className="w-6 h-6" />
-                                {pendingBadgesCount > 0 && (
-                                    <span className="absolute -top-1.5 -right-1.5 bg-gradient-to-r from-red-500 to-rose-600 text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center shadow-lg border-2 border-indigo-950 animate-bounce">
-                                        {pendingBadgesCount}
-                                    </span>
-                                )}
-                            </button>
-                        )}
-                        {isMinaAdmin && (
+                        {!isAuthenticated && (
                             <button
-                                onClick={() => window.dispatchEvent(new CustomEvent('open-gifts-shop'))}
-                                className="relative bg-indigo-800 hover:bg-indigo-700 text-white p-2 rounded-full transition-colors text-xl leading-none"
-                                title="متجر الهدايا"
-                                aria-label="متجر الهدايا"
+                                type="button"
+                                onClick={forceRefreshApp}
+                                className="glass-btn text-white w-10 h-10 rounded-full flex items-center justify-center"
+                                title="تحديث التطبيق"
+                                aria-label="تحديث التطبيق"
                             >
-                                🎁
-                                {giftsPendingCount > 0 && (
-                                    <span className="absolute -top-1.5 -right-1.5 bg-gradient-to-r from-red-500 to-rose-600 text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center shadow-lg border-2 border-indigo-950">
-                                        {giftsPendingCount}
-                                    </span>
-                                )}
+                                🔄
                             </button>
                         )}
-                        {isAuthenticated && (
-                            <button 
-                                onClick={() => setBackupModalOpen(true)}
-                                className="bg-indigo-800 hover:bg-indigo-700 text-white p-2 rounded-full transition-colors"
-                                aria-label="النسخ الاحتياطي"
-                            >
-                                <CloudArrowUpIcon className="w-6 h-6" />
-                            </button>
-                        )}
-                        
                         {isAuthenticated ? (
                             <div className="text-left">
                                 <span className="text-amber-400 font-semibold block text-sm md:text-base">مرحباً, {loggedInAdmin.name}</span>
@@ -3083,39 +3436,42 @@ const App = () => {
                     </div>
                 )}
                 
-                {isSuperAdmin && (
-                    <div className="mb-4 bg-indigo-900/50 border border-amber-500/30 p-3 rounded-lg flex items-center justify-between">
-                         <div className="flex items-center gap-2 text-amber-400">
-                             <CalendarIcon className="w-5 h-5" />
-                             <span className="font-bold">تاريخ التسجيل:</span>
-                         </div>
-                         <input 
-                            type="date"
-                            value={selectedDate}
-                            onChange={(e) => setSelectedDate(e.target.value)}
-                            className="bg-indigo-950 border border-indigo-700 rounded px-2 py-1 text-white focus:outline-none focus:border-amber-500"
-                        />
+                {isSuperAdmin && selectedDate !== todayKey && currentSection === 'home' && (
+                    <div className="mb-4 glass-card border !border-amber-400/40 p-3 rounded-2xl flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 text-amber-300 text-sm font-bold">
+                            <CalendarIcon className="w-5 h-5" />
+                            <span>بتسجّل على يوم {selectedDate}</span>
+                        </div>
+                        <button onClick={() => setSelectedDate(todayKey)} className="text-xs font-black bg-amber-400 text-slate-900 px-3 py-1.5 rounded-full">رجّعه النهارده</button>
                     </div>
                 )}
                 
                 <main>
-                    <div className="mb-6 bg-indigo-900/70 p-1.5 rounded-xl flex items-center gap-2 border border-indigo-800/50 overflow-x-auto">
-                        <button onClick={() => setActiveView('students')} className={`flex-1 min-w-[120px] text-center rounded-lg py-2 font-bold flex items-center justify-center gap-2 transition-colors ${activeView === 'students' ? 'bg-indigo-700 text-amber-400' : 'text-indigo-300 hover:bg-indigo-800/50'}`}>
-                            <UserGroupIcon className="w-5 h-5" />
-                            <span className="whitespace-nowrap">شابات تي بارثينوس ({students.length})</span>
-                        </button>
-                         <button onClick={() => setActiveView('leaderboard')} className={`flex-1 min-w-[120px] text-center rounded-lg py-2 font-bold flex items-center justify-center gap-2 transition-colors ${activeView === 'leaderboard' ? 'bg-indigo-700 text-amber-400' : 'text-indigo-300 hover:bg-indigo-800/50'}`}>
-                             <TrophyIcon className="w-5 h-5" />
-                             <span className="whitespace-nowrap">Leaders Board</span>
-                         </button>
-                         <button onClick={() => setActiveView('attendance_summary')} className={`flex-1 min-w-[120px] text-center rounded-lg py-2 font-bold flex items-center justify-center gap-2 transition-colors ${activeView === 'attendance_summary' ? 'bg-indigo-700 text-amber-400' : 'text-indigo-300 hover:bg-indigo-800/50'}`}>
-                            <CalendarIcon className="w-5 h-5" />
-                            <span className="whitespace-nowrap">سجل الاجتماعات</span>
-                        </button>
-                    </div>
+                    {currentSection === 'home' && (
+                        <div className="mb-5 glass-panel p-1 rounded-2xl grid grid-cols-3 gap-1">
+                            {[
+                                { v: 'students', label: `البنات (${students.length})`, icon: <UserGroupIcon className="w-5 h-5" /> },
+                                { v: 'leaderboard', label: 'الترتيب', icon: <TrophyIcon className="w-5 h-5" /> },
+                                { v: 'attendance_summary', label: 'الاجتماعات', icon: <CalendarIcon className="w-5 h-5" /> },
+                            ].map(t => (
+                                <button key={t.v} onClick={() => setActiveView(t.v)}
+                                    className={`rounded-xl py-2 px-1 text-sm font-bold flex items-center justify-center gap-1.5 transition-all ${activeView === t.v ? 'seg-active text-white' : 'text-white/60 hover:text-white'}`}>
+                                    {t.icon}
+                                    <span className="whitespace-nowrap">{t.label}</span>
+                                </button>
+                            ))}
+                        </div>
+                    )}
 
-                    {activeView === 'students' && (
+                    {!isFollowupOnlyUser && activeView === 'students' && (
                         <div>
+                            {isAuthenticated && (
+                                <button onClick={() => setAddStudentModalOpen(true)}
+                                    className="w-full mb-3 glass-card rounded-2xl py-3 flex items-center justify-center gap-2 text-emerald-300 font-black active:scale-[0.98] transition">
+                                    <UserPlusIcon className="w-5 h-5" />
+                                    <span>إضافة بنت جديدة</span>
+                                </button>
+                            )}
                             <div className="mb-6 relative">
                                 <input
                                     type="text"
@@ -3142,9 +3498,34 @@ const App = () => {
                                     <div key={student.id} id={`student-card-${student.id}`} className={`bg-indigo-900/70 rounded-xl shadow-md border overflow-hidden ${hasAllMonthly ? 'border-amber-400/80 shadow-amber-500/10 ring-1 ring-amber-400/20' : 'border-indigo-800/50'}`}>
                                         <div className="p-4 flex justify-between items-center cursor-pointer hover:bg-indigo-800/50 transition-colors" onClick={() => toggleStudentDetails(student.id)}>
                                             <div className='flex items-center gap-4 flex-wrap'>
-                                                <div className="flex flex-col items-center justify-center min-w-[96px] leading-tight">
-                                                    <div className="text-amber-400 font-bold text-xl">{student.points || 0}</div>
-                                                    {/* نسخة البنات: دي أول سنة، فمفيش نقاط سنين سابقة ولا TOTAL POINTS */}
+                                                <div className="flex flex-col min-w-[124px] rounded-xl bg-indigo-950/60 border border-indigo-700/50 overflow-hidden text-center leading-tight">
+                                                    <div className="px-2 pt-1.5 pb-1">
+                                                        <div className="text-[10px] text-amber-200/80 font-bold">نقاط السنة دي</div>
+                                                        <div className="text-amber-400 font-black text-2xl">{student.points || 0}</div>
+                                                    </div>
+                                                    {Number(student.previousYearsPoints || 0) > 0 && (<>
+                                                    <div className="px-2.5 py-1 border-t border-indigo-700/40 flex items-center justify-between gap-2">
+                                                        <span className="text-[10px] text-sky-300/90 font-bold whitespace-nowrap">السنين السابقة</span>
+                                                        <span className="text-sky-300 font-black text-sm">{student.previousYearsPoints || 0}</span>
+                                                    </div>
+                                                    <div className="px-2.5 py-1 bg-emerald-500/10 border-t border-emerald-400/30 flex items-center justify-between gap-2">
+                                                        <span className="text-[10px] text-emerald-200 font-black whitespace-nowrap">المجموع الكلي</span>
+                                                        <span className="text-emerald-300 font-black text-base">{getStudentTotalPoints(student)}</span>
+                                                    </div>
+                                                    {isMinaAdmin && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                handleEditStudent(student);
+                                                            }}
+                                                            className="py-1 border-t border-indigo-700/40 text-[10px] text-amber-300 hover:text-amber-200 hover:bg-indigo-800/40 font-black"
+                                                            title="تعديل نقاط السنين السابقة"
+                                                        >
+                                                            ✏️ تعديل السنين السابقة
+                                                        </button>
+                                                    )}
+                                                    </>)}
                                                 </div>
                                                 <span className="text-lg font-semibold flex items-center gap-2 flex-wrap">
                                                     <span>{student.name}</span>
@@ -3170,6 +3551,16 @@ const App = () => {
 
                                         {expandedStudentId === student.id && (
                                             <div className="p-4 border-t border-indigo-800/50 bg-indigo-900/50">
+                                                {isAuthenticated && (() => {
+                                                    const list = visibleNotesOf(student);
+                                                    return (
+                                                        <button type="button" onClick={() => { setNotesStudentId(student.id); setNoteDraft(''); }}
+                                                            className="w-full mb-4 flex items-center justify-between gap-2 rounded-xl border border-white/15 bg-white/10 px-3 py-2.5 text-right">
+                                                            <span className="min-w-0 truncate text-sm text-white/85">{list[0] ? `📝 ${list[0].text}` : '📝 مفيش ملاحظات على البنت دي'}</span>
+                                                            <span className="shrink-0 text-xs font-black text-amber-300">{list.length > 0 ? `الملاحظات (${list.length})` : '+ ملاحظة'}</span>
+                                                        </button>
+                                                    );
+                                                })()}
                                                 <div className="flex justify-between items-start mb-4">
                                                     <div className="space-y-2 w-full">
                                                         {/* Name Edit (Super Admin Only) */}
@@ -3207,6 +3598,19 @@ const App = () => {
                                                                         <option value="تالتة ثانوي">تالتة ثانوي</option>
                                                                      </select>
                                                                 </div>
+                                                                {isMinaAdmin && Number(editingStudent.previousYearsPoints || 0) > 0 && (
+                                                                    <div className="flex flex-col gap-1">
+                                                                        <label className="text-xs text-amber-300 font-bold">نقاط السنين السابقة (الأدمن فقط):</label>
+                                                                        <input
+                                                                            type="number"
+                                                                            min="0"
+                                                                            step="1"
+                                                                            value={editingStudent.previousYearsPoints ?? 0}
+                                                                            onChange={(e) => setEditingStudent({...editingStudent, previousYearsPoints: e.target.value})}
+                                                                            className="bg-indigo-700 text-white border border-amber-500/50 rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-amber-500 w-full"
+                                                                        />
+                                                                    </div>
+                                                                )}
                                                                 <div className="flex justify-end gap-2 mt-2">
                                                                     <button onClick={() => handleSaveStudentEdit(student.id)} className="text-green-400 hover:text-green-300 p-1"><CheckIcon className="w-5 h-5"/></button>
                                                                     <button onClick={handleCancelEdit} className="text-red-400 hover:text-red-300 p-1"><XIcon className="w-5 h-5"/></button>
@@ -3245,93 +3649,48 @@ const App = () => {
                                                     </div>
                                                 </div>
 
-                                                 {/* --- Badges and Achievements --- */}
-                                                 <div className="mt-4 pt-4 border-t border-indigo-805/30 animate-fade-in-out">
-                                                     <h4 className="text-sm font-semibold text-indigo-200 mb-3.5 flex items-center gap-2">
-                                                         <span className="text-sm leading-none">🎖️</span>
-                                                         <span>الأوسمة وإنجازات الشاب:</span>
-                                                     </h4>
-                                                     
-                                                     {/* --- Section 1: Monthly Badges --- */}
-                                                     <div className="mb-4 bg-indigo-950/30 p-3 rounded-xl border border-indigo-900/30">
-                                                         <h5 className="text-xs font-black text-amber-300 mb-2.5 flex items-center gap-1.5 opacity-95">
-                                                             <span>🕒</span>
-                                                             <span>أوسمة الشهر الحالي ({getMonthFormattedAr()}):</span>
-                                                         </h5>
-                                                         <div className="flex flex-wrap gap-2">
-                                                             {BADGES_CONFIG.filter(b => b.category === 'monthly').map(badge => {
-                                                                 const isUnlocked = badge.check(student.attendanceHistory, student.points, getCairoMonthPrefix());
-                                                                 const progress = badge.getProgress(student.attendanceHistory, student.points, getCairoMonthPrefix());
-                                                                 return (
-                                                                     <button
-                                                                         key={badge.id}
-                                                                         onClick={(e) => {
-                                                                             e.stopPropagation();
-                                                                             setSelectedBadgeDetail({
-                                                                                 ...badge,
-                                                                                 isUnlocked,
-                                                                                 progress
-                                                                             });
-                                                                         }}
-                                                                         className={`flex items-center gap-1.5 py-1 px-2.5 rounded-full text-xs font-bold transition-all cursor-pointer select-none border ${
-                                                                             isUnlocked 
-                                                                                 ? 'bg-amber-950/70 text-amber-300 border-amber-500/40 hover:bg-amber-900/60 hover:border-amber-400 hover:scale-[1.03]' 
-                                                                                 : 'bg-indigo-950/15 text-indigo-500/40 border-indigo-900/20 opacity-[0.55] hover:opacity-100 hover:text-indigo-400'
-                                                                         }`}
-                                                                     >
-                                                                         <span className="text-sm">{badge.emoji}</span>
-                                                                         <span>{badge.name}</span>
-                                                                         {isUnlocked ? (
-                                                                             <span className="text-[10px] text-green-400 font-extrabold font-mono">✓</span>
-                                                                         ) : (
-                                                                             <span className="text-[9px] text-indigo-400/50 font-mono">({progress})</span>
-                                                                         )}
-                                                                     </button>
-                                                                 );
-                                                             })}
+                                                 {/* --- الأوسمة: دواير صغيرة، ودوس على أي واحدة تشوف تفاصيلها --- */}
+                                                 {(() => {
+                                                     const monthly = BADGES_CONFIG.filter(b => b.category === 'monthly').map(badge => ({
+                                                         badge, isUnlocked: badge.check(student.attendanceHistory, student.points, getCairoMonthPrefix()),
+                                                         progress: badge.getProgress(student.attendanceHistory, student.points, getCairoMonthPrefix()),
+                                                     }));
+                                                     const cumulative = BADGES_CONFIG.filter(b => b.category === 'cumulative').map(badge => ({
+                                                         badge, isUnlocked: badge.check(student.attendanceHistory, student.points, undefined),
+                                                         progress: badge.getProgress(student.attendanceHistory, student.points, undefined),
+                                                     }));
+                                                     const dot = ({ badge, isUnlocked, progress }) => (
+                                                         <button key={badge.id} type="button" title={badge.name}
+                                                             onClick={(e) => { e.stopPropagation(); setSelectedBadgeDetail({ ...badge, isUnlocked, progress }); }}
+                                                             className={`relative w-10 h-10 rounded-full flex items-center justify-center text-lg border transition active:scale-90 ${isUnlocked ? 'bg-amber-400/20 border-amber-300/70 shadow-[0_0_10px_rgba(251,191,36,0.25)]' : 'bg-white/5 border-white/10 grayscale opacity-40'}`}>
+                                                             {badge.emoji}
+                                                             {isUnlocked && <span className="absolute -bottom-0.5 -left-0.5 w-4 h-4 rounded-full bg-emerald-500 text-[9px] text-white font-black flex items-center justify-center">✓</span>}
+                                                         </button>
+                                                     );
+                                                     const mDone = monthly.filter(x => x.isUnlocked).length;
+                                                     const cDone = cumulative.filter(x => x.isUnlocked).length;
+                                                     return (
+                                                         <div className="mt-4 pt-3 border-t border-indigo-800/50">
+                                                             <div className="text-sm font-bold text-indigo-200 mb-2">🎖️ الأوسمة</div>
+                                                             <div className="space-y-2">
+                                                                 <div className="flex items-center gap-2">
+                                                                     <div className="w-20 shrink-0 leading-tight">
+                                                                         <div className="text-[11px] font-bold text-amber-200/90">الشهر ده</div>
+                                                                         <div className={`text-[11px] font-black ${mDone === monthly.length ? 'text-amber-300' : 'text-white/50'}`}>{mDone}/{monthly.length}{mDone === monthly.length ? ' ✨' : ''}</div>
+                                                                     </div>
+                                                                     <div className="flex flex-wrap items-center gap-1.5">{monthly.map(dot)}</div>
+                                                                 </div>
+                                                                 <div className="flex items-center gap-2 pt-2 border-t border-white/10">
+                                                                     <div className="w-20 shrink-0 leading-tight">
+                                                                         <div className="text-[11px] font-bold text-sky-200/90">الألقاب</div>
+                                                                         <div className="text-[11px] font-black text-white/50">{cDone}/{cumulative.length}</div>
+                                                                     </div>
+                                                                     <div className="flex flex-wrap items-center gap-1.5">{cumulative.map(dot)}</div>
+                                                                 </div>
+                                                             </div>
                                                          </div>
-                                                     </div>
-
-                                                     {/* --- Section 2: Cumulative Badges --- */}
-                                                     <div className="bg-indigo-950/30 p-3 rounded-xl border border-indigo-900/30">
-                                                         <h5 className="text-xs font-black text-indigo-300 mb-2.5 flex items-center gap-1.5 opacity-95">
-                                                             <span>🏆</span>
-                                                             <span>ألقاب تراكمية وتحديات رقمية:</span>
-                                                         </h5>
-                                                         <div className="flex flex-wrap gap-2">
-                                                             {BADGES_CONFIG.filter(b => b.category === 'cumulative').map(badge => {
-                                                                 const isUnlocked = badge.check(student.attendanceHistory, student.points, undefined);
-                                                                 const progress = badge.getProgress(student.attendanceHistory, student.points, undefined);
-                                                                 return (
-                                                                     <button
-                                                                         key={badge.id}
-                                                                         onClick={(e) => {
-                                                                             e.stopPropagation();
-                                                                             setSelectedBadgeDetail({
-                                                                                 ...badge,
-                                                                                 isUnlocked,
-                                                                                 progress
-                                                                             });
-                                                                         }}
-                                                                         className={`flex items-center gap-1.5 py-1 px-2.5 rounded-full text-xs font-bold transition-all cursor-pointer select-none border ${
-                                                                             isUnlocked 
-                                                                                 ? 'bg-indigo-950/80 text-amber-300 border-amber-500/40 hover:bg-indigo-900 hover:border-amber-400 hover:scale-[1.03]' 
-                                                                                 : 'bg-indigo-950/15 text-indigo-500/40 border-indigo-900/20 opacity-[0.55] hover:opacity-100 hover:text-indigo-400'
-                                                                         }`}
-                                                                     >
-                                                                         <span className="text-sm">{badge.emoji}</span>
-                                                                         <span>{badge.name}</span>
-                                                                         {isUnlocked ? (
-                                                                             <span className="text-[10px] text-green-400 font-extrabold font-mono font-sans">✓</span>
-                                                                         ) : (
-                                                                             <span className="text-[9px] text-indigo-400/50 font-mono">({progress})</span>
-                                                                         )}
-                                                                     </button>
-                                                                 );
-                                                             })}
-                                                         </div>
-                                                     </div>
-                                                 </div>
+                                                     );
+                                                 })()}
 
                                                  {isAuthenticated && (
                                                     <div className="pt-4 border-t border-indigo-800/50">
@@ -3395,7 +3754,7 @@ const App = () => {
                                                             className="w-full flex items-center justify-center gap-2 bg-red-600/80 hover:bg-red-600 text-white font-bold py-2 px-3 rounded-lg transition-colors"
                                                         >
                                                             <TrashIcon className="w-5 h-5" />
-                                                            <span>حذف الشاب</span>
+                                                            <span>حذف الشابة</span>
                                                         </button>
                                                     </div>
                                                 )}
@@ -3407,7 +3766,7 @@ const App = () => {
                             </div>
                         </div>
                     )}
-                    {activeView === 'leaderboard' && (
+                    {!isFollowupOnlyUser && activeView === 'leaderboard' && (
                          <div className="space-y-4 animate-fade-in-out">
                              {/* Admin Manual Rewards Bar */}
                              {isAuthenticated && (
@@ -3457,7 +3816,12 @@ const App = () => {
                                  <p className="text-center text-indigo-300 mt-10">لا يوجد بيانات لعرضها في هذه التصفية.</p>
                              ) : (
                                  leaderboardStudents.map((student, index) => {
-                                     const rank = index + 1;
+                                     // المتساويين في النقط بياخدوا نفس المركز (الأول، الثاني، الثاني، الثالث...)
+                                     const rank = 1 + new Set(
+                                         leaderboardStudents
+                                             .map(s => Number(s.pointsForLeaderboard || 0))
+                                             .filter(p => p > Number(student.pointsForLeaderboard || 0))
+                                     ).size;
                                      const currentMonthPrefix = getCairoMonthPrefix();
                                      const prevMonthPrefix = getCairoMonthPrefixOffset(-1);
                                      const filterPrefix = leaderboardFilter === 'prev_month' ? prevMonthPrefix : (leaderboardFilter === 'current_month' ? currentMonthPrefix : undefined);
@@ -4047,8 +4411,488 @@ const App = () => {
                     )}
                     
 
-                    {activeView === 'attendance_summary' && (
+                    {(activeView === 'followup' || activeView === 'oversight' || isFollowupOnlyUser) && loggedInAdmin && (() => {
+                        const mode = (activeView === 'oversight' && canOversee && !isFollowupOnlyUser) ? 'oversight' : 'mine';
+                        const tab = mode === 'mine' ? 'mine' : (['report', 'notes', 'groups', 'friday'].includes(followupTab) ? followupTab : 'report');
+                        const reportGrade = myScope === 'all' ? oversightGrade : myScope;
+                        const inReportGrade = (s) => reportGrade === 'all' || String(s.grade || '').trim() === reportGrade;
+                        const noteLine = (n) => n ? `${n.by} • ${fmtShortAt(n.at)}` : '';
+                        const fmt = (d, opts: any = { day: 'numeric', month: 'long' }) => d ? formatCairoDateKeyAr(d, opts) : '';
+                        function fmtShortAt(iso) {
+                            if (!iso) return '';
+                            const d = new Date(iso);
+                            return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('ar-EG', { timeZone: 'Africa/Cairo', day: 'numeric', month: 'short' });
+                        }
+                        const fmtAt = (iso) => {
+                            if (!iso) return '';
+                            const d = new Date(iso);
+                            return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('ar-EG', { timeZone: 'Africa/Cairo', weekday: 'long', day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit' });
+                        };
+                        const methodLabel = (m) => m === 'whatsapp' ? 'واتساب' : m === 'call' ? 'مكالمة' : 'يدوي';
+                        const notesBtn = (s, compact = false) => {
+                            const n = visibleNotesOf(s).length;
+                            return (
+                                <button type="button" onClick={() => { setNotesStudentId(s.id); setNoteDraft(''); }}
+                                    className={`shrink-0 font-bold rounded-lg border border-white/15 bg-white/10 text-white/85 ${compact ? 'text-[11px] px-2 py-1' : 'text-xs px-3 py-2'}`}>
+                                    📝 {n > 0 ? `ملاحظات (${n})` : 'ملاحظة'}
+                                </button>
+                            );
+                        };
+                        const tabBtn = (id, label) => (
+                            <button type="button" onClick={() => setFollowupTab(id)}
+                                className={`flex-1 py-2 rounded-lg text-xs font-black transition-colors ${tab === id ? 'bg-amber-500 text-indigo-950' : 'text-indigo-200 hover:bg-indigo-800/60'}`}>{label}</button>
+                        );
+                        const bar = (done, total) => {
+                            const pct = total ? Math.round((done / total) * 100) : 100;
+                            const color = pct >= 100 ? 'bg-emerald-500' : pct > 0 ? 'bg-amber-500' : 'bg-red-500';
+                            return <div className="h-2 bg-indigo-950 rounded-full overflow-hidden"><div className={`h-full ${color} transition-all`} style={{ width: `${Math.max(pct, total ? 4 : 100)}%` }} /></div>;
+                        };
+
+                        // كارت ولد غايب (بيستخدم في "افتقادي")
+                        const renderStudentCard = (s) => {
+                            const info = followupInfo[s.id] || { streak: 0, lastAttendedDate: '', missedAll: false };
+                            const done = isFollowupContacted(s.id);
+                            const contact = followup.contacts?.[s.id];
+                            const wa = toWhatsAppNumber(s.phone);
+                            const firstName = String(s.name || '').split(' ')[0];
+                            const waText = encodeURIComponent(`أهلاً يا ${firstName} 👋 وحشتنا في الاجتماع! مستنيينك الجمعة الجاية إن شاء الله 🙏`);
+                            return (
+                                <div key={s.id} className={`rounded-2xl border p-3.5 space-y-2.5 ${done ? 'bg-emerald-900/20 border-emerald-600/40' : 'bg-indigo-900/50 border-indigo-700/50'}`}>
+                                    <div className="flex items-start justify-between gap-2">
+                                        <div className="min-w-0">
+                                            <div className="font-bold text-white">{s.name}</div>
+                                            <div className="text-[11px] text-indigo-300 mt-0.5">
+                                                {s.grade ? `${s.grade} • ` : ''}{info.lastAttendedDate ? `آخر حضور ${fmt(info.lastAttendedDate)}` : 'ماحضرش السنة دي'}
+                                            </div>
+                                        </div>
+                                        <span className={`shrink-0 text-[11px] font-black px-2 py-0.5 rounded-full whitespace-nowrap border ${isAtRisk(s.id) ? 'bg-red-600 text-white border-red-400' : 'bg-red-500/15 text-red-300 border-red-400/30'}`}>
+                                            {isAtRisk(s.id) ? '⚠️ ' : ''}{info.streak === 1 ? 'غاب آخر اجتماع' : `غايب ${info.streak} اجتماعات`}
+                                        </span>
+                                    </div>
+                                    <div className="grid grid-cols-3 gap-2">
+                                        {wa ? (
+                                            <a href={`https://wa.me/${wa}?text=${waText}`} target="_blank" rel="noopener noreferrer" onClick={() => startFollowupContact(s.id, 'whatsapp')}
+                                                className="flex items-center justify-center gap-1 bg-green-600 hover:bg-green-700 text-white text-xs font-bold py-2 rounded-lg">
+                                                <WhatsAppIcon className="w-4 h-4" /> واتساب
+                                            </a>
+                                        ) : <span className="flex items-center justify-center bg-indigo-950/60 text-indigo-400 text-[11px] font-bold py-2 rounded-lg">مفيش رقم</span>}
+                                        {wa ? (
+                                            <a href={`tel:${s.phone}`} onClick={() => startFollowupContact(s.id, 'call')}
+                                                className="flex items-center justify-center gap-1 bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold py-2 rounded-lg">📞 اتصال</a>
+                                        ) : <span className="flex items-center justify-center bg-indigo-950/60 text-indigo-400 text-[11px] font-bold py-2 rounded-lg">—</span>}
+                                        <button type="button" onClick={() => toggleFollowupContacted(s.id)}
+                                            className={`text-xs font-bold py-2 rounded-lg ${done ? 'bg-emerald-600 text-white' : 'bg-indigo-700 hover:bg-indigo-600 text-indigo-100'}`}>
+                                            {done ? '✅ اتافتقد' : 'افتقدته'}
+                                        </button>
+                                    </div>
+                                    {!done && pendingContact?.studentId === s.id && (
+                                        <button type="button" onClick={() => openOutcome(pendingContact, hiddenAtRef.current ? Date.now() - hiddenAtRef.current : null)}
+                                            className="w-full text-xs font-black py-2 rounded-lg bg-amber-500 text-indigo-950">⏳ قول حصل إيه علشان يتحسب افتقاد</button>
+                                    )}
+                                    {done && contact && (
+                                        <div className="text-[11px] text-emerald-300">
+                                            اتافتقد ({methodLabel(contact.method)}{contact.outcome && FOLLOWUP_OUTCOMES[contact.outcome] ? ` • ${FOLLOWUP_OUTCOMES[contact.outcome].icon} ${FOLLOWUP_OUTCOMES[contact.outcome].short}` : ''}) {fmt(contact.date, { weekday: 'long', day: 'numeric', month: 'long' })} بواسطة {contact.by}
+                                            {contact.quick && <span className="text-amber-300 font-bold"> • ⚡ رجع بسرعة</span>}
+                                        </div>
+                                    )}
+                                    {(() => {
+                                        const last = visibleNotesOf(s)[0];
+                                        return (
+                                            <div className="flex items-center gap-2">
+                                                <div className="flex-1 min-w-0 text-[11px] text-white/60 truncate">
+                                                    {last ? <>📝 {last.text} <span className="text-white/40">— {noteLine(last)}</span></> : 'مفيش ملاحظات'}
+                                                </div>
+                                                {notesBtn(s, true)}
+                                            </div>
+                                        );
+                                    })()}
+                                </div>
+                            );
+                        };
+
+                        return (
+                            <div className="space-y-4 animate-fade-in-out">
+                                <div className="bg-indigo-900/60 border border-indigo-700/60 rounded-2xl p-4 space-y-2">
+                                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                                        <h2 className="text-lg font-black text-amber-400">{mode === 'oversight' ? `📊 المتابعة${myScope !== 'all' ? ` - ${myScope}` : ''}` : '📞 افتقادي'}</h2>
+                                        {latestMeetingDate && <span className="text-[11px] text-indigo-300">آخر اجتماع: {fmt(latestMeetingDate, { weekday: 'long', day: 'numeric', month: 'long' })}</span>}
+                                    </div>
+                                    {mode === 'oversight' && (
+                                        <div className="grid grid-cols-4 gap-1 p-1 bg-indigo-950/60 rounded-xl">
+                                            {tabBtn('report', 'التقرير')}
+                                            {tabBtn('friday', 'الجمعة')}
+                                            {tabBtn('notes', 'الملاحظات')}
+                                            {tabBtn('groups', 'المجموعات')}
+                                        </div>
+                                    )}
+                                    {mode === 'oversight' && (
+                                        <button type="button" onClick={() => { setMonthReportPrefix(prev => prev || reportMonths[0] || getCairoMonthPrefix()); setMonthReportOpen(true); }}
+                                            className="w-full rounded-xl border border-white/15 bg-white/10 py-2 text-sm font-black text-white">
+                                            📄 التقرير الشهري (PDF)
+                                        </button>
+                                    )}
+                                    {mode === 'oversight' && tab !== 'groups' && myScope === 'all' && (
+                                        <div className="flex gap-1.5 flex-wrap">
+                                            {['all', ...followupGrades].map(g => (
+                                                <button key={g} type="button" onClick={() => setOversightGrade(g)}
+                                                    className={`px-3 py-1 rounded-full text-[11px] font-black border ${oversightGrade === g ? 'bg-amber-500 text-indigo-950 border-amber-400' : 'bg-white/5 text-white/70 border-white/15'}`}>
+                                                    {g === 'all' ? 'كل الصفوف' : g}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {followupMeetings.length === 0 && tab !== 'groups' && tab !== 'notes' && <p className="text-center text-indigo-300 mt-8">لسه مفيش اجتماعات متسجلة.</p>}
+
+                                {/* ===== افتقادي ===== */}
+                                {followupMeetings.length > 0 && tab === 'mine' && (
+                                    <div className="space-y-3">
+                                        {myFollowupGroup.length === 0 ? (
+                                            <p className="text-center text-indigo-300 mt-6">{canOversee ? 'إنت مش عليك مجموعة. المجموعات بتتوزع من 📊 المتابعة ← المجموعات.' : 'لسه ماتوزعتش عليك مجموعة. كلّم أمين الفصل أو الأدمن.'}</p>
+                                        ) : (
+                                            <>
+                                                <div className="bg-indigo-900/40 border border-indigo-700/50 rounded-2xl p-3.5 space-y-2">
+                                                    <div className="text-sm text-white font-bold">
+                                                        مجموعتك {myFollowupGroup.length} بنت • غاب منهم {myFollowupAbsent.length}
+                                                    </div>
+                                                    {myFollowupAbsent.length > 0 && (
+                                                        <>
+                                                            <div className="flex justify-between text-[11px] text-indigo-300"><span>افتقدت {myFollowupAbsent.length - myPendingFollowupCount} من {myFollowupAbsent.length}</span></div>
+                                                            {bar(myFollowupAbsent.length - myPendingFollowupCount, myFollowupAbsent.length)}
+                                                        </>
+                                                    )}
+                                                </div>
+                                                {myFollowupAbsent.length === 0
+                                                    ? <p className="text-center text-emerald-300 mt-4">كل مجموعتك حضرت آخر اجتماع 🎉</p>
+                                                    : myFollowupAbsent.map(s => renderStudentCard(s))}
+                                                {myFollowupGroup.length > myFollowupAbsent.length && (
+                                                    <div className="bg-indigo-900/40 border border-indigo-700/50 rounded-2xl overflow-hidden">
+                                                        <button type="button" onClick={() => setShowWholeGroup(v => !v)} className="w-full flex justify-between items-center px-3.5 py-3 text-sm font-bold text-white">
+                                                            <span>✅ اللي حضروا من مجموعتك ({myFollowupGroup.length - myFollowupAbsent.length})</span>
+                                                            <span className="text-xs text-white/50">{showWholeGroup ? '▲' : '▼'}</span>
+                                                        </button>
+                                                        {showWholeGroup && (
+                                                            <div className="border-t border-indigo-700/50 divide-y divide-indigo-800/60">
+                                                                {myFollowupGroup.filter(s => !isAbsentNow(s.id)).sort((a, b) => String(a.name).localeCompare(String(b.name), 'ar')).map(s => (
+                                                                    <div key={s.id} className="flex items-center justify-between gap-2 px-3.5 py-2">
+                                                                        <span className="text-sm text-white truncate">{s.name}</span>
+                                                                        {notesBtn(s, true)}
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* ===== تقرير الخدام (المتابعة) ===== */}
+                                {followupMeetings.length > 0 && tab === 'report' && mode === 'oversight' && (() => {
+                                    const scoped = followupReport
+                                        .map(r => ({ ...r, group: r.group.filter(inReportGrade), absent: r.absent.filter(inReportGrade), done: r.done.filter(inReportGrade) }))
+                                        .filter(r => r.group.length > 0);
+                                    const unCount = students.filter(s => inReportGrade(s) && !assignedServantId(s.id)).length;
+                                    const unAbsent = students.filter(s => inReportGrade(s) && !assignedServantId(s.id) && isAbsentNow(s.id)).length;
+                                    const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString();
+                                    const notesCountBy = (adminId) => students.filter(inReportGrade).reduce((n, s) => n + allNotesOf(s.id).filter((x: any) => x.byId === adminId && String(x.at || '') >= monthAgo).length, 0);
+                                    const riskList = atRiskStudents.filter(inReportGrade);
+                                    const neverList = neverCameStudents.filter(inReportGrade);
+                                    return (
+                                    <div className="space-y-3">
+                                        {(riskList.length > 0 || neverList.length > 0) && (
+                                            <div className="rounded-2xl border border-red-400/40 bg-red-500/10 overflow-hidden">
+                                                <button type="button" onClick={() => setAtRiskOpen(v => !v)} className="w-full flex items-center justify-between gap-2 p-3.5 text-right">
+                                                    <span className="font-black text-red-200">⚠️ بنات بيبعدوا ({riskList.length})</span>
+                                                    <span className="text-[11px] text-red-200/70">غايبين {AT_RISK_STREAK} اجتماعات أو أكتر {atRiskOpen ? '▲' : '▼'}</span>
+                                                </button>
+                                                {atRiskOpen && (
+                                                    <div className="border-t border-red-400/30 divide-y divide-red-400/15">
+                                                        {riskList.length === 0 && <p className="p-3 text-xs text-red-100/70">مفيش حد بيبعد دلوقتي 🎉</p>}
+                                                        {riskList.map(s => {
+                                                            const info = followupInfo[s.id];
+                                                            const servant = admins.find(a => a.id === assignedServantId(s.id));
+                                                            const last = allNotesOf(s.id)[0];
+                                                            return (
+                                                                <div key={s.id} className="px-3.5 py-2.5 space-y-1">
+                                                                    <div className="flex items-center justify-between gap-2">
+                                                                        <span className="text-sm font-bold text-white truncate">{s.name} <span className="text-[11px] font-normal text-white/50">({s.grade || ''})</span></span>
+                                                                        <span className="shrink-0 text-[11px] font-black text-red-200">غايب {info.streak}</span>
+                                                                    </div>
+                                                                    <div className="text-[11px] text-white/55">
+                                                                        آخر حضور {fmt(info.lastAttendedDate)} • {servant ? `خادمه: ${servant.name}` : <span className="text-red-300 font-bold">مالوش خادم</span>}
+                                                                        {isFollowupContacted(s.id) ? ' • ✅ اتافتقد الأسبوع ده' : ' • ⏳ لسه ماتافتقدش'}
+                                                                    </div>
+                                                                    <div className="flex items-center gap-2">
+                                                                        <div className="flex-1 min-w-0 text-[11px] text-white/50 truncate">{last ? `📝 ${last.text}` : 'مفيش ملاحظات'}</div>
+                                                                        {notesBtn(s, true)}
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })}
+                                                        {neverList.length > 0 && (
+                                                            <p className="px-3.5 py-2.5 text-[11px] text-white/50">وفيه كمان {neverList.length} بنت ماحضروش ولا مرة السنة دي (موجودين في التقرير الشهري).</p>
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                        {unCount > 0 && (
+                                            <button type="button" onClick={() => setFollowupTab('groups')}
+                                                className="w-full text-right bg-red-500/10 border border-red-500/30 rounded-xl p-3 text-xs text-red-200 font-bold">
+                                                ⚠️ فيه {unCount} بنت من غير خادم ({unAbsent} منهم غايبين). دوس هنا عشان توزّعهم.
+                                            </button>
+                                        )}
+                                        {scoped.length === 0 ? (
+                                            <p className="text-center text-indigo-300 mt-6">لسه مفيش مجموعات متوزعة.</p>
+                                        ) : scoped.map(r => {
+                                            const open = expandedReportServant === r.admin.id;
+                                            const pending = r.absent.filter(s => !isFollowupContacted(s.id));
+                                            return (
+                                                <div key={r.admin.id} className="bg-indigo-900/50 border border-indigo-700/50 rounded-2xl overflow-hidden">
+                                                    <button type="button" onClick={() => setExpandedReportServant(open ? '' : r.admin.id)} className="w-full text-right p-3.5 space-y-2">
+                                                        <div className="flex items-center justify-between gap-2">
+                                                            <span className="font-black text-white">{r.admin.name}</span>
+                                                            <span className={`text-xs font-black ${r.absent.length === 0 || r.done.length === r.absent.length ? 'text-emerald-300' : r.done.length > 0 ? 'text-amber-300' : 'text-red-300'}`}>
+                                                                {r.absent.length === 0 ? 'كل مجموعته حضرت ✅' : `افتقد ${r.done.length} من ${r.absent.length}`}
+                                                            </span>
+                                                        </div>
+                                                        {r.absent.length > 0 && bar(r.done.length, r.absent.length)}
+                                                        {r.done.length > 0 && (() => {
+                                                            const cs = r.done.map(s => followup.contacts?.[s.id] || {});
+                                                            const replied = cs.filter(c => isRepliedOutcome(c.outcome)).length;
+                                                            const noReply = cs.filter(c => c.outcome && !isRepliedOutcome(c.outcome)).length;
+                                                            const quickN = cs.filter(c => c.quick).length;
+                                                            return (
+                                                                <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] font-bold">
+                                                                    <span className="text-emerald-300">💬 {replied} ردوا</span>
+                                                                    <span className="text-white/55">🔕 {noReply} مردوش</span>
+                                                                    {quickN > 0 && <span className="text-amber-300">⚡ {quickN} رجع بسرعة</span>}
+                                                                </div>
+                                                            );
+                                                        })()}
+                                                        <div className="flex justify-between gap-2 text-[11px] text-indigo-300">
+                                                            <span>مجموعته {r.group.length} بنت • 📝 {notesCountBy(r.admin.id)} ملاحظة آخر شهر</span>
+                                                            <span className="text-left">{r.lastActivity ? `آخر استخدام: ${fmtAt(r.lastActivity)}` : 'ماستخدمش الافتقاد لسه'}</span>
+                                                        </div>
+                                                    </button>
+                                                    {open && (
+                                                        <div className="border-t border-indigo-700/50 p-3 space-y-1.5 bg-indigo-950/40">
+                                                            {r.absent.length === 0 && <p className="text-xs text-indigo-300">مفيش غايبين في مجموعته.</p>}
+                                                            {[...pending, ...r.done].map(s => {
+                                                                const isDone = isFollowupContacted(s.id);
+                                                                const last = allNotesOf(s.id)[0];
+                                                                return (
+                                                                    <div key={s.id} className="py-1.5 space-y-1">
+                                                                        <div className="flex items-center justify-between gap-2 text-xs">
+                                                                            <span className="text-white truncate">{isDone ? '✅' : '⏳'} {s.name} <span className="text-indigo-400">({s.grade || ''})</span></span>
+                                                                            <span className={`shrink-0 ${isDone ? 'text-emerald-300' : 'text-red-300'}`}>{isDone ? (() => { const c = followup.contacts?.[s.id] || {}; const o = FOLLOWUP_OUTCOMES[c.outcome]; return `${methodLabel(c.method)}${o ? ` • ${o.icon} ${o.short}` : ''}${c.quick ? ' ⚡' : ''}`; })() : 'لسه ماتافتقدش'}</span>
+                                                                        </div>
+                                                                        <div className="flex items-center gap-2">
+                                                                            <div className="flex-1 min-w-0 text-[11px] text-white/55 truncate">{last ? <>📝 {last.text} <span className="text-white/35">— {noteLine(last)}</span></> : 'مفيش ملاحظات'}</div>
+                                                                            {notesBtn(s, true)}
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                    );
+                                })()}
+
+                                {/* ===== كل الملاحظات (المتابعة) ===== */}
+                                {tab === 'notes' && mode === 'oversight' && (() => {
+                                    const feed = students.filter(inReportGrade)
+                                        .flatMap(s => allNotesOf(s.id).map((n: any) => ({ ...n, student: s })))
+                                        .sort((a: any, b: any) => String(b.at || '').localeCompare(String(a.at || '')))
+                                        .slice(0, 80);
+                                    return (
+                                        <div className="space-y-2.5">
+                                            {feed.length === 0 ? (
+                                                <p className="text-center text-indigo-300 mt-6">لسه مفيش ملاحظات اتكتبت.</p>
+                                            ) : feed.map((n: any) => (
+                                                <button key={`${n.student.id}_${n.id}`} type="button" onClick={() => { setNotesStudentId(n.student.id); setNoteDraft(''); }}
+                                                    className="w-full text-right bg-indigo-900/50 border border-indigo-700/50 rounded-2xl p-3 space-y-1">
+                                                    <div className="flex items-center justify-between gap-2">
+                                                        <span className="font-bold text-white text-sm truncate">{n.student.name} <span className="text-[11px] text-indigo-300 font-normal">({n.student.grade || ''})</span></span>
+                                                        <span className="shrink-0 text-[11px] text-white/45">{fmtShortAt(n.at)}</span>
+                                                    </div>
+                                                    <div className="text-sm text-white/85 whitespace-pre-wrap break-words">{n.text}</div>
+                                                    <div className="text-[11px] text-sky-300">✍️ {n.by}</div>
+                                                </button>
+                                            ))}
+                                            {feed.length === 80 && <p className="text-center text-[11px] text-white/40">بيظهر آخر 80 ملاحظة بس. دوس على أي بنت تشوف كل ملاحظاتها.</p>}
+                                        </div>
+                                    );
+                                })()}
+
+                                {/* ===== ملخص الجمعة ===== */}
+                                {tab === 'friday' && mode === 'oversight' && (() => {
+                                    if (followupMeetings.length === 0) return <p className="text-center text-indigo-300 mt-6">لسه مفيش اجتماعات متسجلة.</p>;
+                                    const date = followupMeetings.some(m => m.date === fridayMeetingDate) ? fridayMeetingDate : followupMeetings[0].date;
+                                    const sum = buildFridaySummary(date, inReportGrade);
+                                    if (!sum) return null;
+                                    const text = fridaySummaryText(sum, reportGrade === 'all' ? '' : reportGrade);
+                                    const diff = sum.prevCount === null ? null : sum.present.length - sum.prevCount;
+                                    const stat = (label, value, tone = 'text-white') => (
+                                        <div className="rounded-xl bg-white/5 border border-white/10 py-2 text-center">
+                                            <div className={`text-xl font-black ${tone}`}>{value}</div>
+                                            <div className="text-[10px] text-white/55 font-bold">{label}</div>
+                                        </div>
+                                    );
+                                    const nameList = (title, list, tone) => list.length > 0 && (
+                                        <div className="rounded-xl bg-white/5 border border-white/10 p-3">
+                                            <div className={`text-xs font-black mb-1 ${tone}`}>{title} ({list.length})</div>
+                                            <div className="text-sm text-white/85 leading-relaxed">{list.map(s => s.name).join('، ')}</div>
+                                        </div>
+                                    );
+                                    return (
+                                        <div className="space-y-3">
+                                            <div className="flex gap-1.5 overflow-x-auto pb-1">
+                                                {followupMeetings.slice(0, 8).map(m => (
+                                                    <button key={m.date} type="button" onClick={() => setFridayMeetingDate(m.date)}
+                                                        className={`shrink-0 px-3 py-1.5 rounded-full text-[11px] font-black border ${m.date === date ? 'bg-amber-500 text-indigo-950 border-amber-400' : 'bg-white/5 text-white/70 border-white/15'}`}>
+                                                        {fmt(m.date, { day: 'numeric', month: 'short' })}{isFirstFridayDateKey(m.date) ? ' ⛪' : ''}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                            <div className="grid grid-cols-3 gap-2">
+                                                {stat('حضروا', sum.present.length, 'text-amber-300')}
+                                                {stat('عن اللي قبله', diff === null ? '—' : diff > 0 ? `+${diff}` : String(diff), diff === null ? 'text-white' : diff >= 0 ? 'text-emerald-300' : 'text-red-300')}
+                                                {stat('أول مرة', sum.newKids.length, 'text-sky-300')}
+                                            </div>
+                                            {sum.byGrade.length > 1 && (
+                                                <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${sum.byGrade.length}, minmax(0, 1fr))` }}>
+                                                    {sum.byGrade.map(x => stat(x.g, `${x.n}/${x.total}`))}
+                                                </div>
+                                            )}
+                                            {nameList('🆕 أول مرة ييجوا', sum.newKids, 'text-sky-300')}
+                                            {nameList('🔙 رجعوا بعد غياب', sum.returned, 'text-emerald-300')}
+                                            {sum.top.length > 0 && (
+                                                <div className="rounded-xl bg-white/5 border border-white/10 p-3">
+                                                    <div className="text-xs font-black mb-1 text-amber-300">🏆 أعلى نقط</div>
+                                                    <div className="text-sm text-white/85">{sum.top.map(x => `${x.s.name} (${x.p})`).join('، ')}</div>
+                                                </div>
+                                            )}
+                                            {sum.prev && sum.fuTotal > 0 && (
+                                                <div className="rounded-xl bg-white/5 border border-white/10 p-3 space-y-1.5">
+                                                    <div className="text-xs font-black text-white/80">📞 افتقاد غياب الاجتماع اللي قبله: {sum.fuDone} من {sum.fuTotal}</div>
+                                                    {bar(sum.fuDone, sum.fuTotal)}
+                                                </div>
+                                            )}
+                                            <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                                                <div className="text-[11px] font-black text-white/50 mb-1.5">الرسالة اللي هتتبعت:</div>
+                                                <pre className="whitespace-pre-wrap text-xs text-white/80 font-sans leading-relaxed">{text}</pre>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-2">
+                                                <a href={`https://wa.me/?text=${encodeURIComponent(text)}`} target="_blank" rel="noopener noreferrer"
+                                                    className="flex items-center justify-center gap-1.5 bg-green-600 text-white text-sm font-black py-2.5 rounded-xl">
+                                                    <WhatsAppIcon className="w-4 h-4" /> ابعت واتساب
+                                                </a>
+                                                <button type="button" onClick={() => {
+                                                    const done = () => showToast('✅ اتنسخ الملخص.');
+                                                    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done).catch(() => window.prompt('انسخ الملخص:', text));
+                                                    else window.prompt('انسخ الملخص:', text);
+                                                }} className="bg-white/10 border border-white/15 text-white text-sm font-black py-2.5 rounded-xl">📋 نسخ</button>
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
+
+                                {/* ===== توزيع المجموعات (المتابعة) ===== */}
+                                {tab === 'groups' && mode === 'oversight' && (() => {
+                                    const gradeStudents = students.filter(s => String(s.grade || '').trim() === followupGrade).sort((a, b) => String(a.name).localeCompare(String(b.name), 'ar'));
+                                    const gradeUnassigned = gradeStudents.filter(s => !assignedServantId(s.id));
+                                    const perServant = admins.map(a => ({ a, n: gradeStudents.filter(s => assignedServantId(s.id) === a.id).length })).filter(x => x.n > 0);
+                                    return (
+                                        <div className="space-y-3">
+                                            <div className="flex gap-2 flex-wrap">
+                                                {followupGrades.filter(scopeCoversGrade).map(g => (
+                                                    <button key={g} type="button" onClick={() => { setFollowupGrade(g); setFollowupAssignPickerOpen(false); }}
+                                                        className={`px-3 py-1.5 rounded-full text-xs font-black border ${followupGrade === g ? 'bg-amber-500 text-indigo-950 border-amber-400' : 'bg-indigo-900/60 text-indigo-200 border-indigo-700'}`}>
+                                                        {g} ({students.filter(s => String(s.grade || '').trim() === g).length})
+                                                    </button>
+                                                ))}
+                                            </div>
+
+                                            <div className="bg-indigo-900/50 border border-indigo-700/50 rounded-2xl p-3.5 space-y-2">
+                                                <div className="text-sm font-bold text-white">{followupGrade}: {gradeStudents.length} بنت</div>
+                                                {perServant.length > 0 && (
+                                                    <div className="flex flex-wrap gap-1.5">
+                                                        {perServant.map(x => <span key={x.a.id} className="bg-sky-500/15 text-sky-200 border border-sky-400/30 text-[11px] font-bold px-2 py-0.5 rounded-full">{x.a.name}: {x.n}</span>)}
+                                                    </div>
+                                                )}
+                                                <div className={`text-xs font-bold ${gradeUnassigned.length ? 'text-red-300' : 'text-emerald-300'}`}>
+                                                    {gradeUnassigned.length ? `${gradeUnassigned.length} بنت من غير خادم` : 'كل البنات ليهم خدام ✅'}
+                                                </div>
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    <button type="button" onClick={() => openGroupDistribution(false)} disabled={gradeUnassigned.length === 0}
+                                                        className="bg-sky-600 hover:bg-sky-700 disabled:opacity-40 text-white text-xs font-bold py-2 rounded-lg">🔀 وزّع اللي من غير خادم</button>
+                                                    <button type="button" onClick={() => openGroupDistribution(true)}
+                                                        className="bg-indigo-700 hover:bg-indigo-600 text-indigo-100 text-xs font-bold py-2 rounded-lg">♻️ إعادة توزيع الصف كله</button>
+                                                </div>
+                                                {followupAssignPickerOpen && (
+                                                    <div className="bg-indigo-950/80 border border-sky-500/40 rounded-xl p-3 space-y-2">
+                                                        <p className="text-sm font-bold text-sky-300">
+                                                            {followupReassignAll ? `إعادة توزيع كل بنات ${followupGrade} على:` : `توزيع ${gradeUnassigned.length} بنت من ${followupGrade} على:`}
+                                                        </p>
+                                                        <div className="grid grid-cols-2 gap-2">
+                                                            {admins.filter(a => !a.isLocked).map(a => {
+                                                                const on = followupAssignServants.includes(a.id);
+                                                                return (
+                                                                    <button key={a.id} type="button" onClick={() => setFollowupAssignServants(prev => on ? prev.filter(id => id !== a.id) : [...prev, a.id])}
+                                                                        className={`text-xs font-bold py-2 px-2 rounded-lg border ${on ? 'bg-sky-600 border-sky-400 text-white' : 'bg-indigo-900 border-indigo-700 text-indigo-200'}`}>
+                                                                        {on ? '✓ ' : ''}{a.name}
+                                                                    </button>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                        <div className="flex gap-2">
+                                                            <button type="button" onClick={runGroupDistribution} disabled={followupAssignServants.length === 0}
+                                                                className="flex-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold py-2 rounded-lg text-sm">وزّع بالتساوي</button>
+                                                            <button type="button" onClick={() => setFollowupAssignPickerOpen(false)} className="px-4 bg-indigo-800 text-indigo-200 font-bold py-2 rounded-lg text-sm">إلغاء</button>
+                                                        </div>
+                                                        <p className="text-[11px] text-indigo-400">كل خادم بياخد خليط من اللي بيحضروا واللي بيغيبوا. ولو الخادم مش في القايمة، ضيفه الأول من "الخدام".</p>
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            <div className="bg-indigo-900/40 border border-indigo-700/50 rounded-2xl divide-y divide-indigo-800/60">
+                                                {gradeStudents.map(s => (
+                                                    <div key={s.id} className="flex items-center justify-between gap-2 px-3 py-2">
+                                                        <span className="text-sm text-white truncate">{s.name}</span>
+                                                        <select value={assignedServantId(s.id)} onChange={(e) => assignFollowup(s.id, e.target.value)}
+                                                            className={`shrink-0 max-w-[48%] bg-indigo-950 border rounded-lg px-2 py-1 text-xs ${assignedServantId(s.id) ? 'text-white border-indigo-700' : 'text-red-300 border-red-500/50'}`}>
+                                                            <option value="">— من غير خادم —</option>
+                                                            {admins.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                                                        </select>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
+                            </div>
+                        );
+                    })()}
+
+                    {!isFollowupOnlyUser && activeView === 'attendance_summary' && (
                         <div className="space-y-4 animate-fade-in-out">
+                            {isAuthenticated && meetingsStats.length > 0 && (
+                                <button
+                                    type="button"
+                                    onClick={exportAllMeetingsToExcel}
+                                    className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl shadow-md transition-colors"
+                                >
+                                    📥 تحميل سجل الحضور كله (Excel)
+                                </button>
+                            )}
                             {meetingsStats.length === 0 ? (
                                 <p className="text-center text-indigo-300 mt-10">لا توجد سجلات حضور حتى الآن.</p>
                             ) : (
@@ -4070,6 +4914,15 @@ const App = () => {
                                         </div>
                                         {expandedDate === stat.date && (
                                             <div className="px-4 pb-4 pt-2 border-t border-indigo-800/50 bg-indigo-900/90">
+                                                {isAuthenticated && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => { e.stopPropagation(); exportMeetingToExcel(stat.date); }}
+                                                        className="w-full mb-3 flex items-center justify-center gap-2 bg-emerald-600/90 hover:bg-emerald-600 text-white text-sm font-bold py-2 rounded-lg transition-colors"
+                                                    >
+                                                        📥 تحميل حضور وغياب الاجتماع ده (Excel)
+                                                    </button>
+                                                )}
                                                 <h4 className="text-sm font-semibold text-indigo-200 mb-2">أسماء الحضور ({stat.uniqueAttendees.size}):</h4>
                                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                                                     {students
@@ -4092,8 +4945,13 @@ const App = () => {
                                                                 >
                                                                     <div className="flex items-center justify-between">
                                                                         <div className="flex items-center gap-2">
-                                                                            <div className="w-2 h-2 rounded-full bg-green-500"></div>
+                                                                            <div className="w-2 h-2 rounded-full bg-green-500 shrink-0"></div>
                                                                             <span className="text-white font-semibold">{s.name}</span>
+                                                                            {s.grade && (
+                                                                                <span className="bg-sky-500/15 text-sky-300 border border-sky-400/30 font-black text-[10px] px-2 py-0.5 rounded-full whitespace-nowrap">
+                                                                                    🎓 {s.grade}
+                                                                                </span>
+                                                                            )}
                                                                         </div>
                                                                         <div className="flex items-center gap-1.5 font-mono">
                                                                             <span className={`font-bold ${dailyPoints > 0 ? 'text-amber-400' : 'text-gray-400'}`}>
@@ -4136,38 +4994,291 @@ const App = () => {
                         </div>
                     )}
 
+                    {activeView === 'admin' && isAuthenticated && (
+                        <div className="space-y-4">
+                            <h2 className="text-xl font-black text-white">⚙️ الإدارة</h2>
+                            <div className="grid grid-cols-2 gap-3">
+                                {isSuperAdmin && (
+                                    <button onClick={() => setAdminManagementModalOpen(true)} className="admin-tile">
+                                        <span className="text-3xl">👥</span>
+                                        <span className="font-black text-white">الخدام</span>
+                                        <span className="text-[11px] text-white/55">إضافة وصلاحيات وأرقام سرية</span>
+                                    </button>
+                                )}
+                                {isSuperAdmin && (
+                                    <button onClick={() => window.dispatchEvent(new CustomEvent('open-gifts-shop'))} className="admin-tile relative">
+                                        <span className="text-3xl">🎁</span>
+                                        <span className="font-black text-white">متجر الهدايا</span>
+                                        <span className="text-[11px] text-white/55">الهدايا والطلبات</span>
+                                        {giftsPendingCount > 0 && <span className="tile-badge">{giftsPendingCount}</span>}
+                                    </button>
+                                )}
+                                {isSuperAdmin && (
+                                    <button onClick={() => goSection('badge_alerts')} className="admin-tile relative">
+                                        <span className="text-3xl">🔔</span>
+                                        <span className="font-black text-white">الأوسمة والمكافآت</span>
+                                        <span className="text-[11px] text-white/55">المستحقين وأوائل الشهر</span>
+                                        {pendingBadgesCount > 0 && <span className="tile-badge">{pendingBadgesCount}</span>}
+                                    </button>
+                                )}
+                                <button onClick={() => setBackupModalOpen(true)} className="admin-tile">
+                                    <CloudArrowUpIcon className="w-8 h-8 text-sky-300" />
+                                    <span className="font-black text-white">النسخ الاحتياطي</span>
+                                    <span className="text-[11px] text-white/55">تحميل واستعادة البيانات</span>
+                                </button>
+                                <button onClick={forceRefreshApp} className="admin-tile">
+                                    <span className="text-3xl">🔄</span>
+                                    <span className="font-black text-white">تحديث التطبيق</span>
+                                    <span className="text-[11px] text-white/55">لو حاسس إن فيه حاجة قديمة</span>
+                                </button>
+                            </div>
+                            {isSuperAdmin && (
+                                <div className="glass-card rounded-2xl p-4 flex items-center justify-between gap-3">
+                                    <div>
+                                        <div className="font-black text-white flex items-center gap-2"><CalendarIcon className="w-5 h-5 text-amber-300" /> تاريخ التسجيل</div>
+                                        <div className="text-[11px] text-white/55 mt-0.5">غيّره بس لو هتسجّل نقط ليوم فات</div>
+                                    </div>
+                                    <input
+                                        type="date"
+                                        value={selectedDate}
+                                        onChange={(e) => setSelectedDate(e.target.value || todayKey)}
+                                        className="glass-input rounded-xl px-2 py-1.5 text-white focus:outline-none"
+                                    />
+                                </div>
+                            )}
+                        </div>
+                    )}
+
                 </main>
             </div>
 
             {isAuthenticated && (
-                <div className="fixed bottom-6 left-6 flex flex-col items-center gap-4 z-40">
-                     <button
-                        onClick={() => setScannerOpen(true)}
-                        className="bg-amber-500 hover:bg-amber-600 text-white p-4 rounded-full shadow-lg hover:shadow-xl transition-all duration-300 ease-in-out transform hover:scale-110"
-                        aria-label="فتح الكاميرا للمسح"
-                    >
-                        <CameraIcon className="w-8 h-8" />
-                    </button>
-                    <button
-                        onClick={() => setAddStudentModalOpen(true)}
-                        className="bg-green-600 hover:bg-green-700 text-white p-4 rounded-full shadow-lg hover:shadow-xl transition-all duration-300 ease-in-out transform hover:scale-110"
-                        aria-label="إضافة شابة جديدة"
-                    >
-                        <UserPlusIcon className="w-8 h-8" />
-                    </button>
-                    {isSuperAdmin && (
-                        <button
-                            onClick={() => setAdminManagementModalOpen(true)}
-                            className="bg-sky-600 hover:bg-sky-700 text-white p-4 rounded-full shadow-lg hover:shadow-xl transition-all duration-300 ease-in-out transform hover:scale-110"
-                            aria-label="إدارة الخدام"
-                        >
-                            <ShieldCheckIcon className="w-8 h-8" />
-                        </button>
-                    )}
-                </div>
+                // الشريط اللي تحت: الأقسام الأساسية
+                <nav className="fixed bottom-0 inset-x-0 z-40 px-3" style={{ paddingBottom: 'max(10px, env(safe-area-inset-bottom, 0px))' }}>
+                    <div className="glass-bar max-w-md mx-auto rounded-[26px] grid gap-1 px-2 py-1.5" style={{ gridTemplateColumns: `repeat(${canOversee ? 5 : 4}, minmax(0, 1fr))` }}>
+                        {[
+                            { key: 'home', label: 'الرئيسية', onClick: () => goSection(HOME_VIEWS.includes(activeView) ? activeView : 'students'), icon: <UserGroupIcon className="w-6 h-6" /> },
+                            { key: 'scan', label: 'مسح', onClick: () => setScannerOpen(true), icon: <CameraIcon className="w-6 h-6" /> },
+                            { key: 'followup', label: 'الافتقاد', onClick: () => goSection('followup'), icon: <span className="text-xl leading-6">📞</span>, badge: myPendingFollowupCount },
+                            ...(canOversee ? [{ key: 'oversight', label: 'المتابعة', onClick: () => goSection('oversight'), icon: <span className="text-xl leading-6">📊</span>, badge: atRiskStudents.filter(scopeCoversStudent).length }] : []),
+                            { key: 'admin', label: 'الإدارة', onClick: () => goSection('admin'), icon: <span className="text-xl leading-6">⚙️</span>, badge: adminAlertsCount },
+                        ].map(item => {
+                            const active = item.key === currentSection;
+                            return (
+                                <button key={item.key} onClick={item.onClick} aria-label={item.label}
+                                    className={`relative flex flex-col items-center justify-center gap-0.5 py-1.5 rounded-2xl active:scale-95 transition-all ${active ? 'nav-active text-amber-300' : item.key === 'scan' ? 'text-amber-300' : 'text-white/70'}`}>
+                                    {item.icon}
+                                    <span className="text-[11px] font-bold">{item.label}</span>
+                                    {item.badge > 0 && (
+                                        <span className="absolute top-0.5 right-1/4 bg-red-500 text-white text-[9px] font-black rounded-full min-w-[16px] h-4 px-1 flex items-center justify-center">{item.badge}</span>
+                                    )}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </nav>
             )}
 
-            <Modal isOpen={isScannerOpen} onClose={() => setScannerOpen(false)} title="مسح كود الشاب">
+            {monthReportOpen && canOversee && createPortal((() => {
+                const prefix = monthReportPrefix || reportMonths[0] || getCairoMonthPrefix();
+                const scopeFn = (s) => myScope === 'all' || String(s.grade || '').trim() === myScope;
+                const r = buildMonthReport(prefix, scopeFn);
+                const monthName = getArabicMonthNameFromPrefix(prefix);
+                const dShort = (d) => formatCairoDateKeyAr(d, { day: 'numeric', month: 'long' });
+                const th = { padding: '6px 8px', background: '#eef2ff', color: '#421a3c', fontWeight: 800, fontSize: 12, borderBottom: '1px solid #ecc9e4', textAlign: 'right' as const };
+                const td = { padding: '6px 8px', fontSize: 12, borderBottom: '1px solid #e5e7eb', textAlign: 'right' as const };
+                const h2 = { fontSize: 15, fontWeight: 900, color: '#270c24', margin: '18px 0 8px' };
+                const kpi = (label, value) => (
+                    <div style={{ flex: '1 1 0', minWidth: 90, border: '1px solid #f6e5f1', borderRadius: 12, padding: '8px 6px', textAlign: 'center', background: '#f8faff' }}>
+                        <div style={{ fontSize: 20, fontWeight: 900, color: '#6c2659' }}>{value}</div>
+                        <div style={{ fontSize: 11, color: '#475569', fontWeight: 700 }}>{label}</div>
+                    </div>
+                );
+                return (
+                    <div id="month-report" dir="rtl" style={{ position: 'fixed', inset: 0, zIndex: 70, overflowY: 'auto', background: '#fff', color: '#0f172a', fontFamily: "'Cairo', sans-serif" }}>
+                        <style>{`
+                            @media print {
+                                body.month-report-open #root { display: none !important; }
+                                body.month-report-open::before { display: none !important; }
+                                body.month-report-open { background: #fff !important; }
+                                #month-report { position: static !important; overflow: visible !important; }
+                                #month-report .no-print { display: none !important; }
+                                #month-report table, #month-report .keep { break-inside: avoid; }
+                                @page { size: A4; margin: 12mm; }
+                            }
+                            #month-report * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+                        `}</style>
+                        <div className="no-print" style={{ position: 'sticky', top: 0, zIndex: 2, display: 'flex', gap: 8, alignItems: 'center', padding: 'max(10px, env(safe-area-inset-top, 0px)) 12px 10px', background: '#270c24', color: '#fff', flexWrap: 'wrap' }}>
+                            <select value={prefix} onChange={(e) => setMonthReportPrefix(e.target.value)}
+                                style={{ background: '#421a3c', color: '#fff', border: '1px solid #a2468a', borderRadius: 10, padding: '6px 8px', fontWeight: 800 }}>
+                                {(reportMonths.length ? reportMonths : [prefix]).map(p => <option key={p} value={p}>{getArabicMonthNameFromPrefix(p)}</option>)}
+                            </select>
+                            <button type="button" onClick={() => window.print()} style={{ flex: 1, background: '#f7739c', color: '#270c24', fontWeight: 900, borderRadius: 10, padding: '8px 10px' }}>🖨️ اطبع / احفظ PDF</button>
+                            <button type="button" onClick={() => setMonthReportOpen(false)} style={{ background: 'rgba(255,255,255,0.15)', fontWeight: 900, borderRadius: 10, padding: '8px 12px' }}>إغلاق</button>
+                        </div>
+                        <div style={{ maxWidth: 780, margin: '0 auto', padding: '18px 16px 40px' }}>
+                            <div style={{ borderBottom: '3px solid #6c2659', paddingBottom: 10 }}>
+                                <div style={{ fontSize: 22, fontWeight: 900, color: '#270c24' }}>تقرير شهر {monthName}</div>
+                                <div style={{ fontSize: 13, color: '#475569', fontWeight: 700 }}>اجتماع تي بارثينوس — شابات ثانوي — كنيسة الشهيد العظيم مارمينا مدينة الأحلام{myScope !== 'all' ? ` — ${myScope}` : ''}</div>
+                                <div style={{ fontSize: 11, color: '#94a3b8' }}>اتعمل بواسطة {loggedInAdmin?.name} يوم {formatCairoDateKeyAr(getCairoDateKey(), { day: 'numeric', month: 'long', year: 'numeric' })}</div>
+                            </div>
+
+                            {r.meetings.length === 0 ? (
+                                <p style={{ marginTop: 24, textAlign: 'center', color: '#64748b' }}>مفيش اجتماعات متسجلة في الشهر ده.</p>
+                            ) : (<>
+                                <div className="keep" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 14 }}>
+                                    {kpi('اجتماعات', r.meetings.length)}
+                                    {kpi('متوسط الحضور', `${Math.round(r.totalAvg)} من ${r.scoped.length}`)}
+                                    {kpi('حضروا القداس', r.massKids.length)}
+                                    {kpi('اعترفوا', r.confessions)}
+                                    {kpi('أول مرة ييجوا', r.newKids.length)}
+                                </div>
+
+                                <div style={h2}>📅 الحضور في كل اجتماع</div>
+                                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                    <thead><tr><th style={th}>التاريخ</th>{followupGrades.map(g => <th key={g} style={th}>{g}</th>)}<th style={th}>الإجمالي</th></tr></thead>
+                                    <tbody>{r.perMeeting.map(m => (
+                                        <tr key={m.date}><td style={td}>{dShort(m.date)}{m.isMass ? ' (قداس)' : ''}</td>{m.byGrade.map((n, i) => <td key={i} style={td}>{n}</td>)}<td style={{ ...td, fontWeight: 900 }}>{m.total}</td></tr>
+                                    ))}</tbody>
+                                </table>
+
+                                <div style={h2}>🎓 نسبة الحضور لكل صف</div>
+                                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                    <thead><tr><th style={th}>الصف</th><th style={th}>عدد البنات</th><th style={th}>متوسط الحضور</th><th style={th}>النسبة</th></tr></thead>
+                                    <tbody>{r.grades.map(x => (
+                                        <tr key={x.g}><td style={td}>{x.g}</td><td style={td}>{x.total}</td><td style={td}>{x.avg.toFixed(1)}</td>
+                                            <td style={td}><div style={{ display: 'flex', alignItems: 'center', gap: 6 }}><div style={{ flex: 1, height: 8, background: '#e5e7eb', borderRadius: 99 }}><div style={{ width: `${x.pct}%`, height: 8, background: x.pct >= 50 ? '#10b981' : x.pct >= 25 ? '#f7739c' : '#ef4444', borderRadius: 99 }} /></div><b>{x.pct}%</b></div></td></tr>
+                                    ))}</tbody>
+                                </table>
+
+                                <div style={h2}>📞 الافتقاد (لكل خادم)</div>
+                                {r.servants.length === 0 ? <p style={{ fontSize: 12, color: '#64748b' }}>لسه مفيش مجموعات متوزعة.</p> : (
+                                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                        <thead><tr><th style={th}>الخادم</th><th style={th}>مجموعته</th><th style={th}>غياب</th><th style={th}>افتقد</th><th style={th}>ردوا</th><th style={th}>النسبة</th><th style={th}>⚡</th><th style={th}>ملاحظات</th></tr></thead>
+                                        <tbody>{r.servants.map((x: any) => (
+                                            <tr key={x.a.id}><td style={{ ...td, fontWeight: 800 }}>{x.a.name}</td><td style={td}>{x.size}</td><td style={td}>{x.absent}</td><td style={td}>{x.done}</td><td style={td}>{x.replied}</td>
+                                                <td style={{ ...td, fontWeight: 900, color: x.pct >= 70 ? '#059669' : x.pct >= 30 ? '#e0527f' : '#dc2626' }}>{x.absent ? `${x.pct}%` : '—'}</td><td style={{ ...td, color: x.quick ? '#e0527f' : '#94a3b8' }}>{x.quick || '—'}</td><td style={td}>{x.notesN}</td></tr>
+                                        ))}</tbody>
+                                    </table>
+                                )}
+                                {r.trackingStart && <p style={{ fontSize: 10, color: '#94a3b8', marginTop: 4 }}>* تسجيل الافتقاد لكل اجتماع بدأ من {dShort(r.trackingStart)}، فالاجتماعات اللي قبل كده ممكن تبان أقل من الحقيقة. والمجموعات محسوبة على التوزيع الحالي. ⚡ = الخادم رجع للموقع بعد أقل من 5 ثواني من ما داس واتساب أو اتصال.</p>}
+
+                                <div style={h2}>⭐ أكتر البنات التزامًا</div>
+                                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                    <thead><tr><th style={th}>#</th><th style={th}>الاسم</th><th style={th}>الصف</th><th style={th}>حضر</th><th style={th}>نقط الشهر</th></tr></thead>
+                                    <tbody>{r.committed.map((x, i) => (
+                                        <tr key={x.s.id}><td style={td}>{i + 1}</td><td style={{ ...td, fontWeight: 800 }}>{x.s.name}</td><td style={td}>{x.s.grade || ''}</td><td style={td}>{x.n} من {r.meetings.length}</td><td style={td}>{x.p}</td></tr>
+                                    ))}</tbody>
+                                </table>
+
+                                {r.newKids.length > 0 && (<>
+                                    <div style={h2}>🆕 أول مرة ييجوا الشهر ده ({r.newKids.length})</div>
+                                    <p style={{ fontSize: 12, lineHeight: 1.9 }}>{r.newKids.map(s => s.name).join('، ')}</p>
+                                </>)}
+
+                                <div style={h2}>⚠️ بنات بيبعدوا ({r.atRisk.length})</div>
+                                {r.atRisk.length === 0 ? <p style={{ fontSize: 12, color: '#059669' }}>مفيش حد غايب {AT_RISK_STREAK} اجتماعات ورا بعض 🎉</p> : (
+                                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                        <thead><tr><th style={th}>الاسم</th><th style={th}>الصف</th><th style={th}>غايب</th><th style={th}>آخر حضور</th><th style={th}>خادمه</th></tr></thead>
+                                        <tbody>{r.atRisk.map(s => (
+                                            <tr key={s.id}><td style={{ ...td, fontWeight: 800 }}>{s.name}</td><td style={td}>{s.grade || ''}</td><td style={td}>{followupInfo[s.id]?.streak} اجتماعات</td>
+                                                <td style={td}>{dShort(followupInfo[s.id]?.lastAttendedDate)}</td><td style={td}>{admins.find(a => a.id === assignedServantId(s.id))?.name || '—'}</td></tr>
+                                        ))}</tbody>
+                                    </table>
+                                )}
+                                {r.never.length > 0 && (<>
+                                    <div style={h2}>🚫 ماحضروش ولا مرة السنة دي ({r.never.length})</div>
+                                    <p style={{ fontSize: 12, lineHeight: 1.9 }}>{r.never.map(s => s.name).join('، ')}</p>
+                                </>)}
+                            </>)}
+                        </div>
+                    </div>
+                );
+            })(), document.body)}
+
+            <Modal isOpen={!!outcomeModal && !!loggedInAdmin} onClose={() => setOutcomeModal(null)}
+                title={`📞 حصل إيه مع ${students.find(s => s.id === outcomeModal?.studentId)?.name || ''}؟`}>
+                {outcomeModal && (() => {
+                    const opts = OUTCOMES_BY_METHOD[outcomeModal.method] || OUTCOMES_BY_METHOD.manual;
+                    const quick = outcomeModal.method !== 'manual' && outcomeModal.awayMs !== null && outcomeModal.awayMs < QUICK_MS;
+                    return (
+                        <div className="space-y-3">
+                            {quick && (
+                                <p className="text-xs font-bold text-amber-300 bg-amber-500/10 border border-amber-400/30 rounded-xl p-2.5">
+                                    ⚡ رجعت بسرعة. لو لسه مابعتّش أو ماكلمتش، دوس "لسه ماعملتش" تحت.
+                                </p>
+                            )}
+                            <div className="space-y-2">
+                                {opts.map(o => (
+                                    <button key={o} type="button" onClick={() => finishFollowupContact(o)}
+                                        className={`w-full text-right flex items-center gap-3 rounded-xl border px-3.5 py-3 font-bold ${o === 'unreachable' ? 'border-red-400/30 bg-red-500/10 text-red-100' : isRepliedOutcome(o) ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-100' : 'border-white/15 bg-white/5 text-white'}`}>
+                                        <span className="text-xl">{FOLLOWUP_OUTCOMES[o].icon}</span>
+                                        <span>{FOLLOWUP_OUTCOMES[o].label}</span>
+                                    </button>
+                                ))}
+                            </div>
+                            <textarea value={outcomeNote} onChange={(e) => setOutcomeNote(e.target.value)} rows={2} maxLength={500}
+                                placeholder="ملاحظة (اختياري) — ولو معرفتش توصله لازم تكتب ليه"
+                                className="w-full glass-input rounded-xl px-3 py-2 text-sm text-white placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400 resize-none" />
+                            <button type="button" onClick={cancelFollowupContact} className="w-full text-sm font-bold text-white/60 py-2 rounded-xl border border-white/10">لسه ماعملتش (ماتحسبش)</button>
+                        </div>
+                    );
+                })()}
+            </Modal>
+
+            <Modal isOpen={!!notesStudentId && !!loggedInAdmin} onClose={() => { setNotesStudentId(''); setNoteDraft(''); }}
+                title={`📝 ملاحظات: ${students.find(s => s.id === notesStudentId)?.name || ''}`}>
+                {(() => {
+                    const st = students.find(s => s.id === notesStudentId);
+                    if (!st || !loggedInAdmin) return null;
+                    const list = visibleNotesOf(st);
+                    const seesAll = canSeeAllNotesOf(st);
+                    const fmtNoteAt = (iso) => {
+                        const d = new Date(iso);
+                        return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('ar-EG', { timeZone: 'Africa/Cairo', weekday: 'long', day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit' });
+                    };
+                    return (
+                        <div className="space-y-4">
+                            <div className="text-xs text-white/55">
+                                {st.grade ? `${st.grade} • ` : ''}{assignedServantId(st.id) ? `خادمه: ${admins.find(a => a.id === assignedServantId(st.id))?.name || ''}` : 'مالوش خادم افتقاد'}
+                            </div>
+                            <div className="space-y-2">
+                                <textarea value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} rows={3} maxLength={1000}
+                                    placeholder="اكتب ملاحظة… (مثلًا: عنده امتحانات لحد آخر الشهر)"
+                                    className="w-full glass-input rounded-xl px-3 py-2 text-white placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400 resize-none" />
+                                <button type="button" disabled={!noteDraft.trim()}
+                                    onClick={async () => { const ok = await addNote(st.id, noteDraft); if (ok) { setNoteDraft(''); showToast('✅ اتحفظت الملاحظة.'); } }}
+                                    className="w-full bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-indigo-950 font-black py-2.5 rounded-xl">حفظ الملاحظة</button>
+                                <p className="text-[11px] text-white/45 leading-relaxed">
+                                    الملاحظة بيشوفها خادم البنت وأمين الفصل والمساعدين والأمين العام. البنات مابيشوفوهاش.
+                                    اكتب الحاجات العملية بس، ومتكتبش أسرار عائلية أو تفاصيل حساسة.
+                                </p>
+                                {loggedInAdmin.isSuperAdmin && notesDocKB > 700 && (
+                                    <p className="text-[11px] text-red-300 font-bold">⚠️ مساحة الملاحظات قربت تخلص ({notesDocKB} KB من 1024). قول لـClaude.</p>
+                                )}
+                            </div>
+                            <div className="space-y-2">
+                                <h3 className="text-sm font-black text-white/80">{seesAll ? `كل الملاحظات (${list.length})` : `ملاحظاتك إنت (${list.length})`}</h3>
+                                {list.length === 0 ? (
+                                    <p className="text-center text-sm text-white/45 py-3">لسه مفيش ملاحظات.</p>
+                                ) : list.map((n: any) => (
+                                    <div key={n.id} className="rounded-xl border border-white/12 bg-white/5 p-3 space-y-1.5">
+                                        <div className="text-sm text-white whitespace-pre-wrap break-words">{n.text}</div>
+                                        <div className="flex items-center justify-between gap-2 text-[11px]">
+                                            <span className="text-sky-300">✍️ {n.by} • <span className="text-white/45">{fmtNoteAt(n.at)}</span></span>
+                                            {(loggedInAdmin.isSuperAdmin || n.byId === loggedInAdmin.id) && (
+                                                <button type="button" onClick={() => deleteNote(st.id, n)} className="text-red-300 font-bold px-2 py-0.5 rounded-md hover:bg-red-500/15">مسح</button>
+                                            )}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    );
+                })()}
+            </Modal>
+
+            <Modal isOpen={isScannerOpen} onClose={() => setScannerOpen(false)} title="مسح كود الشابة">
                 <QRScanner onScanSuccess={handleScanSuccess} onScanFailure={handleScanFailure} />
             </Modal>
             
@@ -4188,7 +5299,7 @@ const App = () => {
                     <div>
                         <BarcodeDisplay studentId={studentForBarcode.id} />
                         <p className="text-center text-indigo-300 mt-4 text-sm">
-                            هذا هو الباركود الخاص بالطالب. يمكنه حفظه كصورة على موبايله لاستخدامه في تسجيل الحضور.
+                            هذا هو الباركود الخاص بالطالبة. يمكنها حفظه كصورة على موبايلها لاستخدامه في تسجيل الحضور.
                         </p>
                     </div>
                 )}
@@ -4403,104 +5514,162 @@ const App = () => {
             </Modal>
             
             <Modal isOpen={isAdminManagementModalOpen} onClose={() => setAdminManagementModalOpen(false)} title="إدارة الخدام">
-                <div className="bg-indigo-800/50 p-4 rounded-lg mb-6">
-                    <h3 className="text-lg font-semibold mb-3 text-indigo-200">إضافة خادم جديد</h3>
-                    <div className="flex flex-col md:flex-row items-stretch gap-3">
-                        <input
-                            type="text"
-                            value={newAdminName}
-                            onChange={(e) => setNewAdminName(e.target.value)}
-                            placeholder="اسم الخادم..."
-                            className="w-full md:w-auto flex-grow bg-indigo-800 text-white placeholder-indigo-300 border border-indigo-700 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500"
-                        />
-                        <input
-                            type="password"
-                            value={newAdminPin}
-                            onChange={(e) => setNewAdminPin(e.target.value)}
-                            placeholder="الرقم السري"
-                            className="w-full md:w-48 bg-indigo-800 text-white placeholder-indigo-300 border border-indigo-700 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500"
-                        />
-                        <button
-                            onClick={handleAddAdmin}
-                            className="flex-shrink-0 flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-700 text-white font-bold py-2 px-4 rounded-lg transition-colors"
-                        >
-                            <UserPlusIcon className="w-5 h-5" />
-                            <span>إضافة</span>
+                {(() => {
+                    const servants = admins.filter(a => !a.isSuperAdmin);
+                    const fullCount = servants.filter(a => a.role !== 'followup' && !a.isLocked).length;
+                    const gradeOptions = ['أولى ثانوي', 'تانية ثانوي', 'تالتة ثانوي'];
+                    const roleAvatar = { followup: 'bg-rose-500/20 text-rose-200', full: 'bg-sky-500/20 text-sky-200', class_leader: 'bg-emerald-500/20 text-emerald-200', assistant: 'bg-amber-500/20 text-amber-200' };
+                    const followupCount = servants.filter(a => a.role === 'followup' && !a.isLocked).length;
+                    const lockedCount = servants.filter(a => a.isLocked).length;
+                    const groupSize = (id) => students.filter(s => followup.assignments?.[s.id] === id).length;
+                    const sectionBtn = (id, icon, label, tone) => (
+                        <button type="button" onClick={() => setAdminSectionOpen(adminSectionOpen === id ? '' : id)}
+                            className={`w-full flex items-center justify-between gap-2 px-4 py-3 rounded-xl font-bold text-sm transition-colors ${tone}`}>
+                            <span>{icon} {label}</span>
+                            <span className="text-xs opacity-70">{adminSectionOpen === id ? '▲' : '▼'}</span>
                         </button>
-                    </div>
-                </div>
-
-                <div className="mt-6 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg space-y-2">
-                    <h3 className="text-base font-bold text-amber-400">🔑 تغيير رقمي السري</h3>
-                    <input type="password" inputMode="numeric" value={ownPinCurrent} onChange={e => setOwnPinCurrent(e.target.value)} placeholder="رقمك السري الحالي"
-                        className="w-full bg-indigo-700 text-white placeholder-indigo-300 border border-indigo-600 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-500" />
-                    <input type="password" inputMode="numeric" value={ownPinNew} onChange={e => setOwnPinNew(e.target.value)} placeholder="الرقم الجديد (6 أرقام على الأقل)"
-                        className="w-full bg-indigo-700 text-white placeholder-indigo-300 border border-indigo-600 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-500" />
-                    <input type="password" inputMode="numeric" value={ownPinConfirm} onChange={e => setOwnPinConfirm(e.target.value)} placeholder="اكتب الرقم الجديد تاني للتأكيد"
-                        className="w-full bg-indigo-700 text-white placeholder-indigo-300 border border-indigo-600 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-500" />
-                    <button onClick={handleChangeOwnPin} disabled={!ownPinCurrent || !ownPinNew || !ownPinConfirm}
-                        className="w-full bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-indigo-950 font-bold py-2 rounded-lg transition-colors">
-                        حفظ رقمي الجديد
-                    </button>
-                </div>
-
-                <h3 className="text-lg font-semibold mt-6 mb-3 text-indigo-200">قائمة الخدام الحالية</h3>
-                <div className="space-y-3">
-                    {admins.filter(a => !a.isSuperAdmin).map(admin => (
-                        <div key={admin.id} className="p-3 bg-indigo-800/50 rounded-lg space-y-3">
-                           <div className="flex justify-between items-center">
-                               <div>
-                                   <p className="font-semibold">{admin.name}</p>
-                                   {admin.isLocked ? (
-                                       <span className="text-xs text-red-400 font-semibold">● معطل</span>
-                                   ) : (
-                                       <span className="text-xs text-green-400 font-semibold">● نشط</span>
-                                   )}
-                               </div>
-                               {admin.failedAttempts >= 5 && (
-                                   <button 
-                                       onClick={() => handleUnlockAdminByFailure(admin.id)}
-                                       className="flex items-center gap-1.5 bg-yellow-600 hover:bg-yellow-700 text-white text-xs font-bold py-1 px-2 rounded-lg transition-colors"
-                                   >
-                                       <KeyIcon className="w-3 h-3"/>
-                                       <span>مقفل (5 محاولات)</span>
-                                   </button>
-                               )}
-                           </div>
-                            
-                            {editingAdminId === admin.id ? (
-                                <div className="flex items-center gap-2">
-                                    <input
-                                        type="password"
-                                        value={editingAdminPinValue}
-                                        onChange={e => setEditingAdminPinValue(e.target.value)}
-                                        placeholder="الرقم السري الجديد"
-                                        className="flex-grow bg-indigo-700 text-white placeholder-indigo-300 border border-indigo-600 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-500"
-                                        autoFocus
-                                    />
-                                    <button onClick={() => handleSaveAdminPin(admin.id)} className="text-green-400 hover:text-green-300 p-1.5 rounded-full bg-indigo-900/50"><CheckIcon className="w-5 h-5"/></button>
-                                    <button onClick={() => setEditingAdminId(null)} className="text-red-400 hover:text-red-300 p-1.5 rounded-full bg-indigo-900/50"><XIcon className="w-5 h-5"/></button>
+                    );
+                    const inputCls = "w-full bg-indigo-950 text-white placeholder-indigo-400 border border-indigo-700 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500";
+                    return (
+                        <div className="space-y-4">
+                            {/* ملخص */}
+                            <div className="grid grid-cols-3 gap-2 text-center">
+                                <div className="bg-sky-500/10 border border-sky-400/30 rounded-xl py-2">
+                                    <div className="text-xl font-black text-sky-300">{fullCount}</div>
+                                    <div className="text-[10px] text-sky-200 font-bold">خادم كامل وفوق</div>
                                 </div>
-                            ) : (
-                                <div className="flex items-center gap-2">
-                                    <button
-                                        onClick={() => handleToggleAdminStatus(admin.id)}
-                                        className={`flex-1 text-sm font-bold py-1.5 px-3 rounded-lg transition-colors ${admin.isLocked ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'} text-white`}
-                                    >
-                                        {admin.isLocked ? 'تفعيل' : 'تعطيل'}
-                                    </button>
-                                    <button
-                                        onClick={() => handleStartEditPin(admin)}
-                                        className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-bold py-1.5 px-3 rounded-lg transition-colors"
-                                    >
-                                        تغيير الرقم السري
+                                <div className="bg-rose-500/10 border border-rose-400/30 rounded-xl py-2">
+                                    <div className="text-xl font-black text-rose-300">{followupCount}</div>
+                                    <div className="text-[10px] text-rose-200 font-bold">افتقاد بس</div>
+                                </div>
+                                <div className="bg-slate-500/10 border border-slate-400/30 rounded-xl py-2">
+                                    <div className="text-xl font-black text-slate-300">{lockedCount}</div>
+                                    <div className="text-[10px] text-slate-300 font-bold">معطّل</div>
+                                </div>
+                            </div>
+
+                            {/* إضافة خادم */}
+                            {sectionBtn('add', '➕', 'إضافة خادم جديد', 'bg-sky-600 hover:bg-sky-700 text-white')}
+                            {adminSectionOpen === 'add' && (
+                                <div className="bg-indigo-900/60 border border-indigo-700/60 rounded-xl p-3 space-y-3">
+                                    <input type="text" value={newAdminName} onChange={(e) => setNewAdminName(e.target.value)} placeholder="اسم الخادم (زي ما هيظهر في الافتقاد)" className={inputCls} />
+                                    <input type="password" inputMode="numeric" value={newAdminPin} onChange={(e) => setNewAdminPin(e.target.value)} placeholder="الرقم السري (6 أرقام على الأقل)" className={inputCls} />
+                                    <div className="grid grid-cols-2 gap-2">
+                                        {Object.entries(ROLE_INFO).map(([id, info]) => ({ id, ...info })).map(r => (
+                                            <button key={r.id} type="button" onClick={() => setNewAdminRole(r.id)}
+                                                className={`text-right rounded-xl border p-2.5 transition-colors ${newAdminRole === r.id ? 'bg-amber-500/15 border-amber-400' : 'bg-indigo-950/60 border-indigo-700'}`}>
+                                                <div className={`text-sm font-black ${newAdminRole === r.id ? 'text-amber-300' : 'text-white'}`}>{newAdminRole === r.id ? '◉' : '○'} {r.icon} {r.title}</div>
+                                                <div className="text-[10px] text-indigo-300 mt-1 leading-relaxed">{r.desc}</div>
+                                            </button>
+                                        ))}
+                                    </div>
+                                    {newAdminRole === 'class_leader' && (
+                                        <select value={newAdminGrade} onChange={(e) => setNewAdminGrade(e.target.value)} className={inputCls}>
+                                            {gradeOptions.map(g => <option key={g} value={g}>أمين فصل {g}</option>)}
+                                        </select>
+                                    )}
+                                    <button onClick={handleAddAdmin} disabled={!newAdminName.trim() || !newAdminPin.trim()}
+                                        className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold py-2.5 rounded-lg transition-colors">
+                                        <UserPlusIcon className="w-5 h-5" />
+                                        <span>إضافة الخادم</span>
                                     </button>
                                 </div>
                             )}
 
+                            {/* قايمة الخدام */}
+                            <div>
+                                <h3 className="text-sm font-black text-indigo-200 mb-2">الخدام ({servants.length})</h3>
+                                {servants.length === 0 ? (
+                                    <p className="text-center text-indigo-300 text-sm py-4">لسه مفيش خدام. ضيف أول خادم من فوق.</p>
+                                ) : (
+                                    <div className="space-y-2.5">
+                                        {servants.map(admin => {
+                                            const roleKey = adminRoleKey(admin);
+                                            const size = groupSize(admin.id);
+                                            return (
+                                                <div key={admin.id} className={`rounded-xl border p-3 space-y-2.5 ${admin.isLocked ? 'bg-slate-800/40 border-slate-600/40 opacity-75' : 'bg-indigo-900/50 border-indigo-700/50'}`}>
+                                                    <div className="flex items-center gap-3">
+                                                        <div className={`w-10 h-10 shrink-0 rounded-full flex items-center justify-center font-black text-lg ${roleAvatar[roleKey]}`}>
+                                                            {String(admin.name || '?').trim().charAt(0)}
+                                                        </div>
+                                                        <div className="min-w-0 flex-1">
+                                                            <div className="font-bold text-white truncate">{admin.name}</div>
+                                                            <div className="text-[11px] text-indigo-300">
+                                                                {admin.isLocked ? <span className="text-red-300 font-bold">● معطّل</span> : <span className="text-green-300 font-bold">● نشط</span>}
+                                                                <span> • {ROLE_INFO[roleKey].icon} {ROLE_INFO[roleKey].title}{roleKey === 'class_leader' && admin.leaderGrade ? ` ${admin.leaderGrade}` : ''}</span>
+                                                                {size > 0 && <span> • مجموعته {size} بنت</span>}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* الصلاحية */}
+                                                    <div className="grid grid-cols-2 gap-1 p-1 bg-indigo-950/70 rounded-lg text-xs font-bold">
+                                                        {Object.entries(ROLE_INFO).map(([id, info]: [string, any]) => (
+                                                            <button key={id} type="button" onClick={() => { if (roleKey !== id) handleSetAdminRole(admin.id, id); }}
+                                                                className={`py-1.5 rounded-md transition-colors ${roleKey === id ? 'bg-amber-500 text-indigo-950' : 'text-indigo-200'}`}>{info.icon} {info.title}</button>
+                                                        ))}
+                                                    </div>
+                                                    {roleKey === 'class_leader' && (
+                                                        <select value={admin.leaderGrade || ''} onChange={(e) => handleSetAdminRole(admin.id, 'class_leader', e.target.value)} className={inputCls}>
+                                                            {!admin.leaderGrade && <option value="">اختار الصف</option>}
+                                                            {gradeOptions.map(g => <option key={g} value={g}>أمين فصل {g}</option>)}
+                                                        </select>
+                                                    )}
+
+                                                    {admin.failedAttempts >= 5 && (
+                                                        <button onClick={() => handleUnlockAdminByFailure(admin.id)}
+                                                            className="w-full flex items-center justify-center gap-1.5 bg-yellow-600 hover:bg-yellow-700 text-white text-xs font-bold py-1.5 rounded-lg">
+                                                            <KeyIcon className="w-3 h-3" /> اتقفل بعد 5 محاولات غلط — دوس لفتحه
+                                                        </button>
+                                                    )}
+
+                                                    {editingAdminId === admin.id ? (
+                                                        <div className="flex items-center gap-2">
+                                                            <input type="password" inputMode="numeric" value={editingAdminPinValue} onChange={e => setEditingAdminPinValue(e.target.value)}
+                                                                placeholder="الرقم السري الجديد (6 أرقام)" className={inputCls} autoFocus />
+                                                            <button onClick={() => handleSaveAdminPin(admin.id)} className="text-green-300 p-2 rounded-lg bg-indigo-950"><CheckIcon className="w-5 h-5" /></button>
+                                                            <button onClick={() => setEditingAdminId(null)} className="text-red-300 p-2 rounded-lg bg-indigo-950"><XIcon className="w-5 h-5" /></button>
+                                                        </div>
+                                                    ) : (
+                                                        <div className="grid grid-cols-2 gap-2">
+                                                            <button onClick={() => handleStartEditPin(admin)}
+                                                                className="bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-bold py-2 rounded-lg">🔑 تغيير الرقم السري</button>
+                                                            <button onClick={() => handleToggleAdminStatus(admin.id)}
+                                                                className={`text-xs font-bold py-2 rounded-lg text-white ${admin.isLocked ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600/80 hover:bg-red-700'}`}>
+                                                                {admin.isLocked ? '✅ تفعيل الحساب' : '⛔ تعطيل الحساب'}
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* حسابي */}
+                            {sectionBtn('pin', '🔑', 'تغيير رقمي السري', 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30')}
+                            {adminSectionOpen === 'pin' && (
+                                <div className="bg-indigo-900/60 border border-amber-500/30 rounded-xl p-3 space-y-2">
+                                    <input type="password" inputMode="numeric" value={ownPinCurrent} onChange={e => setOwnPinCurrent(e.target.value)} placeholder="رقمك السري الحالي" className={inputCls} />
+                                    <input type="password" inputMode="numeric" value={ownPinNew} onChange={e => setOwnPinNew(e.target.value)} placeholder="الرقم الجديد (6 أرقام على الأقل)" className={inputCls} />
+                                    <input type="password" inputMode="numeric" value={ownPinConfirm} onChange={e => setOwnPinConfirm(e.target.value)} placeholder="اكتب الرقم الجديد تاني للتأكيد" className={inputCls} />
+                                    <button onClick={handleChangeOwnPin} disabled={!ownPinCurrent || !ownPinNew || !ownPinConfirm}
+                                        className="w-full bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-indigo-950 font-bold py-2 rounded-lg">حفظ رقمي الجديد</button>
+                                </div>
+                            )}
+
+                            {/* منطقة حساسة */}
+                            {sectionBtn('season', '🔄', 'بداية سنة جديدة', 'bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/30')}
+                            {adminSectionOpen === 'season' && (
+                                <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-3 space-y-2">
+                                    <p className="text-xs text-red-200/90 leading-relaxed">بتنقل نقط السنة دي لـ"نقاط السنين السابقة" لكل البنات، وتصفّر نقط السنة وسجل الحضور. بتحمّل نسخة احتياطية الأول، وبتسألك مرتين.</p>
+                                    <button type="button" onClick={handleStartNewSeason} className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 rounded-lg">بداية سنة جديدة</button>
+                                </div>
+                            )}
                         </div>
-                    ))}
-                </div>
+                    );
+                })()}
             </Modal>
 
             
@@ -4607,7 +5776,7 @@ const App = () => {
              </Modal>
 
 {toastMessage && (
-                <div className="fixed bottom-6 right-6 bg-indigo-900 text-white py-2 px-5 rounded-lg shadow-xl border border-indigo-700 animate-fade-in-out">
+                <div className={`fixed ${loggedInAdmin ? 'bottom-24' : 'bottom-6'} right-6 left-6 sm:left-auto z-50 bg-indigo-900 text-white py-2 px-5 rounded-lg shadow-xl border border-indigo-700 animate-fade-in-out text-center sm:text-right`}>
                     <p>{toastMessage}</p>
                 </div>
             )}
@@ -4665,13 +5834,13 @@ const App = () => {
 
                     {/* Student Select */}
                     <div>
-                        <label className="block text-xs text-indigo-300 font-bold mb-1.5">اختر الشاب المستحق للمكافأة:</label>
+                        <label className="block text-xs text-indigo-300 font-bold mb-1.5">اختر الشابة المستحقة للمكافأة:</label>
                         <select
                             value={rewardStudentId}
                             onChange={(e) => setRewardStudentId(e.target.value)}
                             className="w-full bg-indigo-950 border border-indigo-700 text-white rounded-lg p-2.5 text-sm focus:outline-none focus:border-amber-400"
                         >
-                            <option value="">-- اضغط لاختيار الشاب --</option>
+                            <option value="">-- اضغط لاختيار الشابة --</option>
                             {students.map(s => (
                                 <option key={s.id} value={s.id}>
                                     {s.name} ({s.points || 0} نقطة)
@@ -4747,7 +5916,7 @@ const App = () => {
 
                     {/* Description / Reason */}
                     <div>
-                        <label className="block text-xs text-indigo-300 font-bold mb-1.5">البيان / الوصف (يظهر في سجل الشاب):</label>
+                        <label className="block text-xs text-indigo-300 font-bold mb-1.5">البيان / الوصف (يظهر في سجل الشابة):</label>
                         <input
                             type="text"
                             value={rewardCustomDesc}
@@ -4763,7 +5932,7 @@ const App = () => {
                             className="flex-1 bg-gradient-to-r from-amber-500 to-yellow-600 hover:from-amber-400 hover:to-yellow-500 text-indigo-950 font-black py-3 rounded-xl transition-all shadow-lg active:scale-[0.98] flex items-center justify-center gap-2 text-sm md:text-base"
                         >
                             <span>🏆</span>
-                            <span>إضافة المكافأة للشاب الآن</span>
+                            <span>إضافة المكافأة للشابة الآن</span>
                         </button>
                         <button
                             type="button"
@@ -4855,13 +6024,13 @@ const App = () => {
                     <div className="space-y-5 text-right font-sans" dir="rtl">
                         <div className="bg-indigo-950/80 p-4 rounded-xl border border-indigo-800/60 flex items-center justify-between">
                             <div><h3 className="font-black text-amber-400 text-base md:text-lg">{studentForPointsEdit.name}</h3><p className="text-xs text-indigo-300 mt-0.5">تعديل رصيد النقاط والفلوس في لوحة الصدارة</p></div>
-                            <div className="bg-amber-500/20 text-amber-300 px-3.5 py-2 rounded-xl border border-amber-500/30 text-xs font-black shadow-inner">الرصيد الحالي: {studentForPointsEdit.pointsForLeaderboard ?? studentForPointsEdit.points ?? 0} نقطة | {getStudentMoney(studentForPointsEdit)} جنيه</div>
+                            <div className="bg-amber-500/20 text-amber-300 px-3.5 py-2 rounded-xl border border-amber-500/30 text-xs font-black shadow-inner">الرصيد الحالي: {studentForPointsEdit.points ?? 0} نقطة | {getStudentMoney(studentForPointsEdit)} جنيه</div>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div className="bg-indigo-900/40 p-4 rounded-xl border border-indigo-800/40"><label className="block text-xs font-bold text-amber-300 mb-2">عدد النقاط المطلوب 🎯</label><div className="relative"><input type="number" value={targetPointsInput} onChange={(e) => handlePointsInputChange(e.target.value)} placeholder="مثال: 100" className="w-full bg-indigo-950 text-white font-extrabold text-lg px-3 py-2.5 rounded-lg border border-indigo-700 focus:outline-none focus:border-amber-500 text-right" /><span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-indigo-400 font-bold">نقطة</span></div></div>
-                            <div className="bg-indigo-900/40 p-4 rounded-xl border border-indigo-800/40"><label className="block text-xs font-bold text-amber-300 mb-2">القيمة بالجنيه 💰 (مستقلة تماماً)</label><div className="relative"><input type="number" value={targetMoneyInput} onChange={(e) => handleMoneyInputChange(e.target.value)} placeholder="مثال: 50" className="w-full bg-indigo-950 text-white font-extrabold text-lg px-3 py-2.5 rounded-lg border border-indigo-700 focus:outline-none focus:border-amber-500 text-right" /><span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-indigo-400 font-bold">جنيه</span></div></div>
+                            <div className="bg-indigo-900/40 p-4 rounded-xl border border-indigo-800/40"><label className="block text-xs font-bold text-amber-300 mb-2">القيمة بالجنيه 💰</label><div className="relative"><input type="number" value={targetMoneyInput} onChange={(e) => handleMoneyInputChange(e.target.value)} placeholder="مثال: 50" className="w-full bg-indigo-950 text-white font-extrabold text-lg px-3 py-2.5 rounded-lg border border-indigo-700 focus:outline-none focus:border-amber-500 text-right" /><span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-indigo-400 font-bold">جنيه</span></div></div>
                         </div>
-                        <div className="bg-amber-500/10 border border-amber-500/30 p-3.5 rounded-xl text-xs text-amber-200/90 leading-relaxed">💡 <span className="font-bold text-amber-300">تنويه:</span> النقاط والجنيهات منفصلان تماماً. يمكنك إدخال أي عدد نقاط وأي مبلغ بالجنيه بشكل مستقل دون تأثر إحداهما بالأخرى.</div>
+                        <div className="bg-amber-500/10 border border-amber-500/30 p-3.5 rounded-xl text-xs text-amber-200/90 leading-relaxed">💡 <span className="font-bold text-amber-300">تنويه:</span> الجنيهات = نص النقط وبتتغير لوحدها مع النقط. لو غيّرت الجنيهات بإيدك، الفرق ده بيتحفظ وبيفضل ماشي مع النقط بعد كده.</div>
                         <div className="flex gap-3 pt-2">
                             <button onClick={handleSavePointsEdit} className="flex-1 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-indigo-950 font-black py-3 rounded-xl transition-all text-sm shadow-md active:scale-[0.98]">حفظ التغييرات 💾</button>
                             <button onClick={() => setStudentForPointsEdit(null)} className="px-5 bg-indigo-900 hover:bg-indigo-800 text-indigo-200 font-bold py-3 rounded-xl transition-all text-sm">إلغاء</button>
@@ -4875,7 +6044,7 @@ const App = () => {
                     ⚠️ بيانات الطلاب وصلت {Math.round(studentsDocBytes / 10485.76)}% من الحد الأقصى. حمّل نسخة احتياطية وكلّم المطوّر قريب عشان نوسّع المساحة.
                 </div>
             )}
-            <div style={{ position: 'fixed', bottom: 4, right: 8, fontSize: 10, opacity: 0.45, color: '#ecc9e4', zIndex: 1, pointerEvents: 'none', direction: 'ltr' }}>v{APP_VERSION}</div>
+            <div style={{ position: 'fixed', bottom: loggedInAdmin ? 'calc(1px + env(safe-area-inset-bottom, 0px))' : 4, right: 6, fontSize: 8, opacity: 0.35, color: '#ecc9e4', zIndex: 45, pointerEvents: 'none', direction: 'ltr' }}>v{APP_VERSION}</div>
         </div>
     );
 };
