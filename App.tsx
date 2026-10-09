@@ -21,7 +21,7 @@ const appStorage = {
 const generateId = () => `_${Math.random().toString(36).substring(2, 11)}`;
 
 const CAIRO_TIMEZONE = 'Africa/Cairo';
-const APP_VERSION = '2026.10.08.girls-v5';
+const APP_VERSION = '2026.10.08.girls-v6';
 
 const getCairoDateParts = (date = new Date()) => {
     const parts = new Intl.DateTimeFormat('en-US', {
@@ -737,7 +737,7 @@ const getFirstFridayOfFollowingMonth = (baseDate = new Date()) => {
 };
 
 const PointActions = ({ student, addPoints, onActionAfterAdd = null, fromScan = false, selectedDate, isSuperAdmin = false }) => {
-    // نوع النقط المتغيرة اللي الخادم بيضيفها (مشاركة / Games / خصم)
+    // نوع النقط المتغيرة اللي الخادم بيضيفها (مشاركة / Games / دراسة الكتاب / خصم)
     const [mode, setMode] = useState('participation');
     const [amount, setAmount] = useState('1');
     const [participationDescription, setParticipationDescription] = useState('');
@@ -759,6 +759,7 @@ const PointActions = ({ student, addPoints, onActionAfterAdd = null, fromScan = 
         const hasReceivedPointsToday = (type) => history.some(h => h.date === targetDate && h.type === type);
         const hasReceivedAttendanceToday = hasReceivedPointsToday('early') || hasReceivedPointsToday('late');
         const hasReceivedGamesStationToday = hasReceivedPointsToday('gamesStation');
+        const hasReceivedBibleStudyToday = hasReceivedPointsToday('bibleStudy');
         const hasReceivedMassThisMonth = history.some(h =>
             h.date && h.date.startsWith(currentMonthStr) && h.type === 'monthlyMass'
         );
@@ -775,6 +776,7 @@ const PointActions = ({ student, addPoints, onActionAfterAdd = null, fromScan = 
             canAddLate: targetIsFriday && !hasReceivedAttendanceToday && meetingTimeAllowed,
             canAddConfession: canAddConfession && meetingTimeAllowed,
             canAddGamesStation: regularMeetingTimeAllowed && !hasReceivedGamesStationToday,
+            canAddBibleStudy: regularMeetingTimeAllowed && !hasReceivedBibleStudyToday,
             canAddParticipation: regularMeetingTimeAllowed,
             windowMessage: isHistoricalEdit ? null : (currentWindow?.message || null),
             meetingTimeLabel: getMeetingTimeMessage(),
@@ -793,6 +795,7 @@ const PointActions = ({ student, addPoints, onActionAfterAdd = null, fromScan = 
     const MODES = {
         participation: { label: 'مشاركة', emoji: '✨', min: -10, max: 50, def: 1, enabled: rules.canAddParticipation, tone: 'from-amber-500 to-orange-600', ring: 'border-amber-400 text-amber-200 bg-amber-500/20' },
         gamesStation: { label: 'Games', emoji: '🎮', min: -50, max: 100, def: 1, enabled: rules.canAddGamesStation, tone: 'from-fuchsia-500 to-pink-600', ring: 'border-fuchsia-400 text-fuchsia-200 bg-fuchsia-500/20' },
+        bibleStudy: { label: 'الكتاب', emoji: '📖', min: -50, max: 100, def: 1, enabled: rules.canAddBibleStudy, tone: 'from-emerald-500 to-teal-600', ring: 'border-emerald-400 text-emerald-200 bg-emerald-500/20' },
         exchange: { label: 'خصم', emoji: '🔄', min: 1, max: 3000, def: 5, enabled: true, tone: 'from-rose-600 to-red-700', ring: 'border-rose-400 text-rose-200 bg-rose-500/20' },
     };
     const cfg = MODES[mode];
@@ -1810,12 +1813,12 @@ const App = () => {
                 }
             }
 
-            if (type === 'gamesStation' || type === 'roots') {
+            if (type === 'gamesStation' || type === 'roots' || type === 'bibleStudy') {
                 const alreadyRegistered = student.attendanceHistory.some(h =>
                     h.date === dateToRecord && h.type === type
                 );
                 if (alreadyRegistered) {
-                    showToast(`تم تسجيل ${type === 'gamesStation' ? 'Games Station' : 'ROOTS'} لـ ${student.name} بالفعل في هذا اليوم.`);
+                    showToast(`تم تسجيل ${type === 'gamesStation' ? 'Games Station' : type === 'bibleStudy' ? 'دراسة الكتاب' : 'ROOTS'} لـ ${student.name} بالفعل في هذا اليوم.`);
                     return prevStudents;
                 }
             }
@@ -1828,6 +1831,7 @@ const App = () => {
                 confession: 'اعتراف',
                 gamesStation: 'Games Station',
                 roots: 'ROOTS',
+                bibleStudy: 'دراسة الكتاب',
                 exchange: 'تبديل النقاط'
             };
 
